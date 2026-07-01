@@ -166,6 +166,34 @@ class Phase1ImportTests(unittest.TestCase):
         self.assertEqual(grouped[0]["tokens"][0]["token_index"], 0)
         self.assertEqual(grouped[0]["tokens"][0]["cefr_level"], "A1")
 
+    def test_fetch_indexed_paragraph_tokens_checks_once_for_live_payload(self) -> None:
+        calls: list[str] = []
+
+        def fake_fetch_tokens(text: str) -> list[dict[str, str]]:
+            calls.append(text)
+            return [
+                {"text": "First", "level": "A1", "tip": "n=A1"},
+                {"text": " ", "level": "", "tip": ""},
+                {"text": "paragraph", "level": "A2", "tip": "n=A2"},
+                {"text": ".", "level": "", "tip": ""},
+                {"text": "\n\n", "level": "", "tip": ""},
+                {"text": "Second", "level": "A1", "tip": "n=A1"},
+                {"text": " ", "level": "", "tip": ""},
+                {"text": "paragraph", "level": "A2", "tip": "n=A2"},
+                {"text": ".", "level": "", "tip": ""},
+            ]
+
+        with patch("app.cefr.can_fetch_cefr", return_value=True), patch("app.cefr.fetch_tokens", side_effect=fake_fetch_tokens):
+            grouped = fetch_indexed_paragraph_tokens(
+                [
+                    {"paragraph_index": 1, "text": "First paragraph."},
+                    {"paragraph_index": 2, "text": "Second paragraph."},
+                ]
+            )
+
+        self.assertEqual(calls, ["First paragraph.\n\nSecond paragraph."])
+        self.assertEqual(len(grouped), 2)
+
     def test_ornament_divider_is_not_rendered_as_image_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

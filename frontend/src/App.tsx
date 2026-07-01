@@ -370,6 +370,8 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   const lastScrollTargetRef = useRef<string>("");
   const requestedCefrRef = useRef<Set<string>>(new Set());
   const completedCefrRef = useRef<Set<string>>(new Set());
+  const activeCefrKeyRef = useRef<string>("");
+  const cefrAbortRef = useRef<AbortController | null>(null);
   const shouldRestoreScrollRef = useRef<boolean>(false);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
@@ -407,6 +409,8 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     const loadBook = async () => {
       setLoading(true);
       setError(null);
+      cefrAbortRef.current?.abort();
+      activeCefrKeyRef.current = "";
       requestedCefrRef.current.clear();
       completedCefrRef.current.clear();
       setChapterCache({});
@@ -474,6 +478,16 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     };
   }, [book, selectedChapterIndex, chapterCache]);
 
+  const abortCurrentCefrLoad = () => {
+    if (activeCefrKeyRef.current) {
+      requestedCefrRef.current.delete(activeCefrKeyRef.current);
+    }
+    cefrAbortRef.current?.abort();
+    cefrAbortRef.current = null;
+    activeCefrKeyRef.current = "";
+    setLoadingCefr(false);
+  };
+
   const ensureVisibleCefrLoaded = async (currentBookId: number, paragraphs: ParagraphRecord[]) => {
     if (!paragraphs.length || paragraphsHaveCefr(paragraphs)) {
       return;
@@ -490,6 +504,13 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       return;
     }
 
+    if (activeCefrKeyRef.current && activeCefrKeyRef.current !== cacheKey) {
+      requestedCefrRef.current.delete(activeCefrKeyRef.current);
+      cefrAbortRef.current?.abort();
+    }
+    const controller = new AbortController();
+    cefrAbortRef.current = controller;
+    activeCefrKeyRef.current = cacheKey;
     requestedCefrRef.current.add(cacheKey);
     setLoadingCefr(true);
     try {
@@ -504,23 +525,44 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
               text: paragraph.text,
             })),
           }),
+          signal: controller.signal,
         });
+        if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
+          return;
+        }
         if (!response.ok) {
           throw new Error(`Failed to load CEFR from Oxford (${response.status})`);
         }
         const payload = (await response.json()) as CEFRCheckSummary;
+        if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
+          return;
+        }
         enriched.push(...payload.paragraphs);
+      }
+      if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
+        return;
       }
       writeCachedParagraphs(cacheKey, enriched);
       completedCefrRef.current.add(cacheKey);
       setChapterCache((current) => mergeParagraphsIntoChapters(current, enriched));
     } catch (loadError) {
+      if (loadError instanceof DOMException && loadError.name === "AbortError") {
+        return;
+      }
       setError(loadError instanceof Error ? loadError.message : "Failed to load CEFR from Oxford.");
     } finally {
       requestedCefrRef.current.delete(cacheKey);
-      setLoadingCefr(false);
+      if (activeCefrKeyRef.current === cacheKey) {
+        cefrAbortRef.current = null;
+        activeCefrKeyRef.current = "";
+        setLoadingCefr(false);
+      }
     }
   };
+
+  useEffect(() => {
+    abortCurrentCefrLoad();
+  }, [scrollTargetKey]);
 
   useEffect(() => {
     if (!book || !currentChapter) {

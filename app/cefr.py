@@ -69,15 +69,11 @@ def fetch_paragraph_tokens_tolerant(paragraphs: list[str]) -> list[list[dict[str
     if not can_fetch_cefr():
         raise RuntimeError("playwright-cli is not available for Oxford CEFR checks.")
 
-    all_tokens: list[list[dict[str, str]]] = []
-    for chunk in _paragraph_chunks(paragraphs):
-        joined = "\n\n".join(chunk)
-        tokens = fetch_tokens(joined)
-        if "".join(token["text"] for token in tokens) == joined:
-            all_tokens.extend(_split_tokens_by_paragraph(tokens, chunk))
-            continue
-        all_tokens.extend(_split_tokens_by_paragraph(_align_tokens_to_source(joined, tokens), chunk))
-    return all_tokens
+    joined = "\n\n".join(paragraphs)
+    tokens = fetch_tokens(joined)
+    if "".join(token["text"] for token in tokens) == joined:
+        return _split_tokens_by_paragraph(tokens, paragraphs)
+    return _split_tokens_by_paragraph(_align_tokens_to_source(joined, tokens), paragraphs)
 
 
 def fetch_paragraph_tokens(paragraphs: list[str]) -> list[list[dict[str, str]]]:

@@ -6,7 +6,6 @@ import mimetypes
 from pathlib import Path
 import posixpath
 import sys
-import threading
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile
@@ -33,7 +32,6 @@ from app.schemas import BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJob
 BOOKS_DIR = Path("books")
 FRONTEND_DIST = Path("frontend") / "dist"
 cefr_batch_runner = CEFRBatchRunner()
-cefr_check_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -177,8 +175,7 @@ def load_book_part_cefr(
 def check_cefr(payload: CEFRCheckPayload) -> dict[str, object]:
     paragraphs = [paragraph.model_dump() for paragraph in payload.paragraphs if paragraph.text]
     try:
-        with cefr_check_lock:
-            return {"paragraphs": fetch_indexed_paragraph_tokens(paragraphs)}
+        return {"paragraphs": fetch_indexed_paragraph_tokens(paragraphs)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
