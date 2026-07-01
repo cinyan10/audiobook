@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from app.db import connect, init_db
-from app.cefr import fetch_paragraph_tokens
+from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
 from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, save_progress, scan_books_directory
 
 
@@ -156,6 +156,15 @@ class Phase1ImportTests(unittest.TestCase):
         self.assertEqual("".join(token["text"] for token in grouped[0]), "First paragraph.")
         self.assertEqual("".join(token["text"] for token in grouped[1]), "Second paragraph.")
         self.assertEqual(calls[0], "First paragraph.\n\nSecond paragraph.")
+
+    def test_fetch_indexed_paragraph_tokens_is_stateless(self) -> None:
+        mocked_tokens = [[{"text": "Simple", "level": "A1", "tip": "adj=A1"}]]
+        with patch("app.cefr.fetch_paragraph_tokens_tolerant", return_value=mocked_tokens):
+            grouped = fetch_indexed_paragraph_tokens([{"paragraph_index": 7, "text": "Simple"}])
+
+        self.assertEqual(grouped[0]["paragraph_index"], 7)
+        self.assertEqual(grouped[0]["tokens"][0]["token_index"], 0)
+        self.assertEqual(grouped[0]["tokens"][0]["cefr_level"], "A1")
 
     def test_ornament_divider_is_not_rendered_as_image_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

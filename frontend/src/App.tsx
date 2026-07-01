@@ -88,12 +88,8 @@ type ChapterPayload = {
   blocks: ChapterBlock[];
 };
 
-type CEFRPartLoadSummary = {
-  book_id: number;
-  part_index: number;
-  status: string;
+type CEFRCheckSummary = {
   paragraphs: ParagraphRecord[];
-  cefr: CEFRSummary;
 };
 
 type ScanSummary = {
@@ -116,6 +112,8 @@ type CEFRJobSummary = {
 type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
 
 const LEVEL_LABELS = ["A1", "A2", "B1", "B2", "C1"] as const;
+const CEFR_CACHE_PREFIX = "audiobook-cefr:v1";
+const MAX_CEFR_BATCH_WORDS = 5000;
 
 function App() {
   const [view, setView] = useState<ViewState>(readLocation());
@@ -364,13 +362,14 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
-  const [loadingPartIndex, setLoadingPartIndex] = useState<number | null>(null);
+  const [loadingCefr, setLoadingCefr] = useState(false);
   const chapterParagraphsRef = useRef<ParagraphRecord[]>([]);
   const paragraphRefs = useRef<Array<HTMLElement | null>>([]);
   const saveTimeoutRef = useRef<number | null>(null);
   const lastSavedRef = useRef<number>(-1);
   const lastScrollTargetRef = useRef<string>("");
-  const requestedPartsRef = useRef<Set<number>>(new Set());
+  const requestedCefrRef = useRef<Set<string>>(new Set());
+  const completedCefrRef = useRef<Set<string>>(new Set());
   const shouldRestoreScrollRef = useRef<boolean>(false);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
@@ -408,7 +407,8 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     const loadBook = async () => {
       setLoading(true);
       setError(null);
-      requestedPartsRef.current.clear();
+      requestedCefrRef.current.clear();
+      completedCefrRef.current.clear();
       setChapterCache({});
       try {
         const response = await fetch(`/api/books/${bookId}`);
@@ -474,42 +474,51 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     };
   }, [book, selectedChapterIndex, chapterCache]);
 
-  const ensurePartLoaded = async (currentBook: ReaderPayload, paragraphIndex: number) => {
-    const part = currentBook.cefr_parts.find(
-      (item) => paragraphIndex >= item.start_paragraph_index && paragraphIndex <= item.end_paragraph_index,
-    );
-    if (!part || part.status === "ready" || part.status === "error" || part.status === "loading" || requestedPartsRef.current.has(part.part_index)) {
+  const ensureVisibleCefrLoaded = async (currentBookId: number, paragraphs: ParagraphRecord[]) => {
+    if (!paragraphs.length || paragraphsHaveCefr(paragraphs)) {
       return;
     }
-    requestedPartsRef.current.add(part.part_index);
-    setLoadingPartIndex(part.part_index);
-    setBook((current) =>
-      current
-        ? {
-            ...current,
-            cefr_parts: current.cefr_parts.map((item) =>
-              item.part_index === part.part_index ? { ...item, status: "loading" } : item,
-            ),
-          }
-        : current,
-    );
-    await loadPart(currentBook.id, part.part_index);
-  };
+    const cacheKey = cefrCacheKey(currentBookId, paragraphs);
+    if (completedCefrRef.current.has(cacheKey) || requestedCefrRef.current.has(cacheKey)) {
+      return;
+    }
 
-  const loadPart = async (currentBookId: number, partIndex: number) => {
+    const cached = readCachedParagraphs(cacheKey);
+    if (cached) {
+      completedCefrRef.current.add(cacheKey);
+      setChapterCache((current) => mergeParagraphsIntoChapters(current, cached));
+      return;
+    }
+
+    requestedCefrRef.current.add(cacheKey);
+    setLoadingCefr(true);
     try {
-      const response = await fetch(`/api/books/${currentBookId}/cefr-parts/${partIndex}/load`, { method: "POST" });
-      if (!response.ok) {
-        throw new Error(`Failed to load CEFR part (${response.status})`);
+      const enriched: ParagraphRecord[] = [];
+      for (const batch of splitParagraphBatches(paragraphs)) {
+        const response = await fetch("/api/cefr/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paragraphs: batch.map((paragraph) => ({
+              paragraph_index: paragraph.paragraph_index,
+              text: paragraph.text,
+            })),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to load CEFR from Oxford (${response.status})`);
+        }
+        const payload = (await response.json()) as CEFRCheckSummary;
+        enriched.push(...payload.paragraphs);
       }
-      const payload = (await response.json()) as CEFRPartLoadSummary;
-      setBook((current) => mergePartSummary(current, payload));
-      setChapterCache((current) => mergePartIntoChapters(current, payload));
+      writeCachedParagraphs(cacheKey, enriched);
+      completedCefrRef.current.add(cacheKey);
+      setChapterCache((current) => mergeParagraphsIntoChapters(current, enriched));
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load CEFR part.");
+      setError(loadError instanceof Error ? loadError.message : "Failed to load CEFR from Oxford.");
     } finally {
-      requestedPartsRef.current.delete(partIndex);
-      setLoadingPartIndex((current) => (current === partIndex ? null : current));
+      requestedCefrRef.current.delete(cacheKey);
+      setLoadingCefr(false);
     }
   };
 
@@ -544,7 +553,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     } else {
       window.scrollTo({ top: 0, behavior: "auto" });
     }
-    void ensurePartLoaded(book, currentChapter.start_paragraph_index);
+    void ensureVisibleCefrLoaded(book.id, currentParagraphs);
   }, [book, currentChapter, currentParagraphs, scrollTargetKey]);
 
   useEffect(() => {
@@ -567,7 +576,6 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       if (absoluteParagraphIndex === undefined) {
         return;
       }
-      void ensurePartLoaded(book, absoluteParagraphIndex);
       if (saveTimeoutRef.current !== null) {
         window.clearTimeout(saveTimeoutRef.current);
       }
@@ -718,7 +726,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                 </span>
                 {currentPartWordCount !== null ? <span className="legend-pill neutral">{currentPartWordCount} words</span> : null}
                 {loadingChapter ? <span className="legend-pill neutral">Loading chapter...</span> : null}
-                {loadingPartIndex !== null ? <span className="legend-pill neutral">Loading current section...</span> : null}
+                {loadingCefr ? <span className="legend-pill neutral">Loading current section...</span> : null}
               </div>
 
               <div className={`chapter-heading ${isImageOnlyView ? "chapter-heading-image-only" : ""}`}>
@@ -796,25 +804,8 @@ function ProgressRing({ percent, label }: { percent: number; label: string }) {
   );
 }
 
-function mergePartSummary(current: ReaderPayload | null, payload: CEFRPartLoadSummary): ReaderPayload | null {
-  if (!current || current.id !== payload.book_id) {
-    return current;
-  }
-  return {
-    ...current,
-    cefr_status: payload.cefr.status,
-    cefr: payload.cefr,
-    cefr_parts: current.cefr_parts.map((part) =>
-      part.part_index === payload.part_index ? { ...part, status: payload.status } : part,
-    ),
-  };
-}
-
-function mergePartIntoChapters(
-  current: Record<number, ChapterBlock[]>,
-  payload: CEFRPartLoadSummary,
-): Record<number, ChapterBlock[]> {
-  const paragraphMap = new Map(payload.paragraphs.map((paragraph) => [paragraph.paragraph_index, paragraph]));
+function mergeParagraphsIntoChapters(current: Record<number, ChapterBlock[]>, paragraphs: ParagraphRecord[]): Record<number, ChapterBlock[]> {
+  const paragraphMap = new Map(paragraphs.map((paragraph) => [paragraph.paragraph_index, paragraph]));
   const next = { ...current };
   for (const [chapterIndex, blocks] of Object.entries(current)) {
     next[Number(chapterIndex)] = blocks.map((block) =>
@@ -824,6 +815,65 @@ function mergePartIntoChapters(
     );
   }
   return next;
+}
+
+function splitParagraphBatches(paragraphs: ParagraphRecord[]): ParagraphRecord[][] {
+  const batches: ParagraphRecord[][] = [];
+  let current: ParagraphRecord[] = [];
+  let currentWords = 0;
+  for (const paragraph of paragraphs) {
+    const words = countWords(paragraph.text);
+    if (current.length && currentWords + words > MAX_CEFR_BATCH_WORDS) {
+      batches.push(current);
+      current = [];
+      currentWords = 0;
+    }
+    current.push(paragraph);
+    currentWords += words;
+  }
+  if (current.length) {
+    batches.push(current);
+  }
+  return batches;
+}
+
+function paragraphsHaveCefr(paragraphs: ParagraphRecord[]): boolean {
+  return paragraphs.some((paragraph) => paragraph.tokens.some((token) => Boolean(token.cefr_level)));
+}
+
+function cefrCacheKey(bookId: number, paragraphs: ParagraphRecord[]): string {
+  const first = paragraphs[0]?.paragraph_index ?? 0;
+  const last = paragraphs[paragraphs.length - 1]?.paragraph_index ?? first;
+  return `${CEFR_CACHE_PREFIX}:${bookId}:${first}-${last}:${textSignature(paragraphs)}`;
+}
+
+function textSignature(paragraphs: ParagraphRecord[]): string {
+  let hash = 0;
+  let words = 0;
+  for (const paragraph of paragraphs) {
+    words += countWords(paragraph.text);
+    for (let index = 0; index < paragraph.text.length; index += 1) {
+      hash = (hash * 31 + paragraph.text.charCodeAt(index)) | 0;
+    }
+  }
+  return `${words}-${(hash >>> 0).toString(36)}`;
+}
+
+function readCachedParagraphs(cacheKey: string): ParagraphRecord[] | null {
+  try {
+    const cached = window.localStorage.getItem(cacheKey);
+    return cached ? (JSON.parse(cached) as ParagraphRecord[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedParagraphs(cacheKey: string, paragraphs: ParagraphRecord[]) {
+  try {
+    window.localStorage.setItem(cacheKey, JSON.stringify(paragraphs));
+  } catch {
+    // localStorage is best-effort; the reader still works without persistence.
+  }
 }
 
 function renderJobStatus(job: CEFRJobSummary | null): string {

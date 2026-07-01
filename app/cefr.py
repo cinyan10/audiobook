@@ -8,6 +8,7 @@ from oxford_cefr import LEVEL_COLORS, fetch_tokens
 
 WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*")
 MAX_CEFR_CHARS = 4000
+MAX_CEFR_WORDS = 5000
 
 
 def can_fetch_cefr() -> bool:
@@ -17,6 +18,10 @@ def can_fetch_cefr() -> bool:
 def normalize_text(text: str) -> str:
     stripped = text.strip().replace("’", "'").lower()
     return stripped if WORD_RE.fullmatch(stripped) else ""
+
+
+def count_words(text: str) -> int:
+    return len(WORD_RE.findall(text))
 
 
 def plain_tokens(text: str) -> list[dict[str, str]]:
@@ -31,6 +36,48 @@ def plain_tokens(text: str) -> list[dict[str, str]]:
     if position < len(text):
         tokens.append({"text": text[position:], "level": "", "tip": ""})
     return tokens
+
+
+def fetch_indexed_paragraph_tokens(paragraphs: list[dict[str, object]]) -> list[dict[str, object]]:
+    total_words = sum(count_words(str(paragraph["text"])) for paragraph in paragraphs)
+    if total_words > MAX_CEFR_WORDS:
+        raise ValueError(f"Oxford CEFR checks are limited to {MAX_CEFR_WORDS} words per request.")
+
+    grouped_tokens = fetch_paragraph_tokens_tolerant([str(paragraph["text"]) for paragraph in paragraphs])
+    return [
+        {
+            "paragraph_index": int(paragraph["paragraph_index"]),
+            "text": str(paragraph["text"]),
+            "tokens": [
+                {
+                    "token_index": token_index,
+                    "text": token["text"],
+                    "normalized_text": normalize_text(token["text"]),
+                    "cefr_level": token.get("level") or None,
+                    "oxford_tip": token.get("tip") or None,
+                }
+                for token_index, token in enumerate(tokens)
+            ],
+        }
+        for paragraph, tokens in zip(paragraphs, grouped_tokens)
+    ]
+
+
+def fetch_paragraph_tokens_tolerant(paragraphs: list[str]) -> list[list[dict[str, str]]]:
+    if not paragraphs:
+        return []
+    if not can_fetch_cefr():
+        raise RuntimeError("playwright-cli is not available for Oxford CEFR checks.")
+
+    all_tokens: list[list[dict[str, str]]] = []
+    for chunk in _paragraph_chunks(paragraphs):
+        joined = "\n\n".join(chunk)
+        tokens = fetch_tokens(joined)
+        if "".join(token["text"] for token in tokens) == joined:
+            all_tokens.extend(_split_tokens_by_paragraph(tokens, chunk))
+            continue
+        all_tokens.extend(_split_tokens_by_paragraph(_align_tokens_to_source(joined, tokens), chunk))
+    return all_tokens
 
 
 def fetch_paragraph_tokens(paragraphs: list[str]) -> list[list[dict[str, str]]]:
@@ -77,6 +124,32 @@ def _paragraph_chunks(paragraphs: list[str], max_chars: int = MAX_CEFR_CHARS) ->
     if current:
         chunks.append(current)
     return chunks
+
+
+def _align_tokens_to_source(source: str, oxford_tokens: list[dict[str, str]]) -> list[dict[str, str]]:
+    source_tokens = plain_tokens(source)
+    oxford_words = [
+        (normalized, token.get("level", ""), token.get("tip", ""))
+        for token in oxford_tokens
+        if (normalized := normalize_text(token["text"]))
+    ]
+    oxford_index = 0
+    for token in source_tokens:
+        normalized = normalize_text(token["text"])
+        if not normalized:
+            continue
+        match_index = -1
+        for candidate in range(oxford_index, min(len(oxford_words), oxford_index + 8)):
+            if oxford_words[candidate][0] == normalized:
+                match_index = candidate
+                break
+        if match_index == -1:
+            continue
+        _, level, tip = oxford_words[match_index]
+        token["level"] = level
+        token["tip"] = tip
+        oxford_index = match_index + 1
+    return source_tokens
 
 
 def _split_tokens_by_paragraph(tokens: list[dict[str, str]], paragraphs: list[str]) -> list[list[dict[str, str]]]:

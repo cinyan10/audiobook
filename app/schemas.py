@@ -119,6 +119,19 @@ class CEFRPartLoadSummary(BaseModel):
     cefr: CEFRSummary
 
 
+class CEFRCheckParagraphInput(BaseModel):
+    paragraph_index: int = Field(ge=0)
+    text: str
+
+
+class CEFRCheckPayload(BaseModel):
+    paragraphs: list[CEFRCheckParagraphInput]
+
+
+class CEFRCheckSummary(BaseModel):
+    paragraphs: list[ParagraphRecord]
+
+
 class CEFRJobSummary(BaseModel):
     id: int | None = None
     status: str

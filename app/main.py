@@ -6,12 +6,15 @@ import mimetypes
 from pathlib import Path
 import posixpath
 import sys
+import threading
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from app.cefr import fetch_indexed_paragraph_tokens
 
 try:
     from PIL import Image
@@ -24,12 +27,13 @@ except ModuleNotFoundError:
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
 from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, save_progress, scan_books_directory, store_uploaded_book
-from app.schemas import BookSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
+from app.schemas import BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
 BOOKS_DIR = Path("books")
 FRONTEND_DIST = Path("frontend") / "dist"
 cefr_batch_runner = CEFRBatchRunner()
+cefr_check_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -167,6 +171,18 @@ def load_book_part_cefr(
             return enrich_book_part_cefr(connection, book_id, part_index)
         except Exception:
             return get_cefr_part_payload(connection, book_id, part_index)
+
+
+@app.post("/api/cefr/check", response_model=CEFRCheckSummary)
+def check_cefr(payload: CEFRCheckPayload) -> dict[str, object]:
+    paragraphs = [paragraph.model_dump() for paragraph in payload.paragraphs if paragraph.text]
+    try:
+        with cefr_check_lock:
+            return {"paragraphs": fetch_indexed_paragraph_tokens(paragraphs)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/books/{book_id}/progress", response_model=ProgressSummary)
