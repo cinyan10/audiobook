@@ -8,7 +8,7 @@ from zipfile import ZipFile
 
 from app.db import connect, init_db
 from app.cefr import fetch_paragraph_tokens
-from app.library import enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, save_progress, scan_books_directory
+from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, save_progress, scan_books_directory
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +44,12 @@ ORNAMENT_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
 <p>First part.</p>
 <img src="images/Art_orn.jpg" alt="" />
 <p>Second part.</p>
+</body></html>
+"""
+
+REDUNDANT_TITLE_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>-- Test Book</p>
+<p>Chapter line.</p>
 </body></html>
 """
 
@@ -172,6 +178,98 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "First part.")
             self.assertEqual(chapter["blocks"][1]["paragraph"]["text"], "Second part.")
             connection.close()
+
+    def test_stale_divider_paragraph_is_skipped_from_rendered_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, ORNAMENT_CHAPTER_HTML)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, status = import_book(connection, epub_path)
+            self.assertEqual(status, "imported")
+            book_id = int(summary["id"])
+
+            connection.execute(
+                "UPDATE book_paragraphs SET paragraph_index = 2 WHERE book_id = ? AND paragraph_index = 1",
+                (book_id,),
+            )
+            connection.execute(
+                "UPDATE book_tokens SET paragraph_index = 2 WHERE book_id = ? AND paragraph_index = 1",
+                (book_id,),
+            )
+            connection.execute(
+                "INSERT INTO book_paragraphs (book_id, paragraph_index, text) VALUES (?, 1, ?)",
+                (book_id, "X X X"),
+            )
+            connection.executemany(
+                """
+                INSERT INTO book_tokens (book_id, token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip)
+                VALUES (?, ?, 1, ?, ?, NULL, NULL)
+                """,
+                [
+                    (book_id, 100, "X", "x"),
+                    (book_id, 101, " ", ""),
+                    (book_id, 102, "X", "x"),
+                    (book_id, 103, " ", ""),
+                    (book_id, 104, "X", "x"),
+                ],
+            )
+            connection.execute(
+                "UPDATE book_chapters SET end_paragraph_index = 2 WHERE book_id = ? AND chapter_index = 0",
+                (book_id,),
+            )
+            connection.commit()
+
+            chapter = get_chapter_payload(connection, book_id, 0)
+            assert chapter is not None
+            self.assertEqual([block["kind"] for block in chapter["blocks"]], ["paragraph", "paragraph"])
+            self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "First part.")
+            self.assertEqual(chapter["blocks"][1]["paragraph"]["text"], "Second part.")
+            self.assertEqual("".join(token["text"] for token in chapter["blocks"][1]["paragraph"]["tokens"]), "Second part.")
+            connection.close()
+
+    def test_redundant_title_with_leading_dashes_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, REDUNDANT_TITLE_CHAPTER_HTML)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, status = import_book(connection, epub_path)
+            self.assertEqual(status, "imported")
+
+            chapter = get_chapter_payload(connection, int(summary["id"]), 0)
+            assert chapter is not None
+            self.assertEqual([block["kind"] for block in chapter["blocks"]], ["paragraph"])
+            self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "Chapter line.")
+            connection.close()
+
+    def test_chapter_heading_paragraphs_to_skip(self) -> None:
+        self.assertEqual(
+            chapter_heading_paragraphs_to_skip(
+                "4 Saki Kawasaki has some stuff going on, so she’s sulking.",
+                ["4", "Saki Kawasaki has some stuff going on, so she’s sulking."],
+            ),
+            2,
+        )
+        self.assertEqual(
+            chapter_heading_paragraphs_to_skip(
+                "4 Saki Kawasaki has some stuff going on, so she’s sulking.",
+                ["Saki Kawasaki has some stuff going on, so she’s sulking."],
+            ),
+            1,
+        )
 
     def _write_epub(self, path: Path, chapter_html: str = CHAPTER_HTML) -> None:
         with ZipFile(path, "w") as book:

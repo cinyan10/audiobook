@@ -19,7 +19,11 @@ def now_iso() -> str:
 
 
 def is_redundant_title_paragraph(book_title: str, paragraph_text: str) -> bool:
-    return normalize_display_text(book_title) == normalize_display_text(paragraph_text)
+    normalized_title = normalize_display_text(book_title)
+    normalized_paragraph = normalize_display_text(paragraph_text)
+    if normalized_title == normalized_paragraph:
+        return True
+    return normalize_display_text(re.sub(r"^[^\w]+", "", paragraph_text)) == normalized_title
 
 
 def is_divider_paragraph(paragraph_text: str) -> bool:
@@ -28,6 +32,25 @@ def is_divider_paragraph(paragraph_text: str) -> bool:
 
 def normalize_display_text(text: str) -> str:
     return " ".join(text.replace("’", "'").split()).strip().lower()
+
+
+def chapter_heading_paragraphs_to_skip(chapter_title: str, leading_paragraphs: list[str]) -> int:
+    normalized_title = normalize_display_text(chapter_title)
+    if not normalized_title or not leading_paragraphs:
+        return 0
+    if normalize_display_text(leading_paragraphs[0]) == normalized_title:
+        return 1
+
+    title_without_number = normalize_display_text(re.sub(r"^\d+\W*", "", chapter_title))
+    if len(leading_paragraphs) >= 2:
+        combined = normalize_display_text(" ".join(leading_paragraphs[:2]))
+        if combined == normalized_title:
+            return 2
+        if leading_paragraphs[0].strip().isdigit() and title_without_number and normalize_display_text(leading_paragraphs[1]) == title_without_number:
+            return 2
+    if title_without_number and normalize_display_text(leading_paragraphs[0]) == title_without_number:
+        return 1
+    return 0
 
 
 def build_cefr_parts(paragraphs: list[str], max_chars: int = MAX_CEFR_CHARS) -> list[tuple[int, int]]:
@@ -594,11 +617,18 @@ def build_raw_chapter_blocks(
             }
         )
     chapter_blocks = read_epub_chapter_blocks(source_path, str(raw_chapter_row["source_href"]))
-    paragraph_iter = iter(paragraphs)
+    paragraph_index = 0
     blocks: list[dict[str, object]] = []
+    skipped_heading_paragraphs = 0
+    heading_paragraphs_to_skip = chapter_heading_paragraphs_to_skip(
+        str(raw_chapter_row["title"]),
+        [block.text for block in chapter_blocks[:2] if block.kind == "paragraph"],
+    )
     for block in chapter_blocks:
         if block.kind == "image":
             if "Art_orn" in block.image_src:
+                if paragraph_index < len(paragraphs) and is_divider_paragraph(str(paragraphs[paragraph_index]["text"])):
+                    paragraph_index += 1
                 continue
             blocks.append(
                 {
@@ -610,9 +640,13 @@ def build_raw_chapter_blocks(
                 }
             )
             continue
-        paragraph = next(paragraph_iter, None)
+        paragraph = paragraphs[paragraph_index] if paragraph_index < len(paragraphs) else None
+        paragraph_index += 1
         display_text = block.text
-        if paragraph is None or is_redundant_title_paragraph(book_title, display_text):
+        if skipped_heading_paragraphs < heading_paragraphs_to_skip:
+            skipped_heading_paragraphs += 1
+            continue
+        if paragraph is None or is_redundant_title_paragraph(book_title, display_text) or is_divider_paragraph(str(paragraph["text"])):
             continue
         blocks.append(
             {
@@ -684,7 +718,7 @@ def build_chapter_parts(
                     "end_paragraph_index": paragraph_index - 1,
                 }
             )
-            current_start = paragraph_index
+            current_start = paragraph_index + 1
     if end_paragraph_index >= current_start:
         parts.append(
             {
