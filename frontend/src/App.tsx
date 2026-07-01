@@ -27,6 +27,15 @@ type ParagraphRecord = {
   tokens: TokenRecord[];
 };
 
+type ImageRecord = {
+  src: string;
+  alt: string;
+};
+
+type ChapterBlock =
+  | { kind: "paragraph"; paragraph: ParagraphRecord; image?: never }
+  | { kind: "image"; image: ImageRecord; paragraph?: never };
+
 type CEFRSummary = {
   status: string;
   ready_parts: number;
@@ -40,11 +49,19 @@ type CEFRPartRecord = {
   status: string;
 };
 
+type ChapterPartRecord = {
+  part_index: number;
+  title: string;
+  start_paragraph_index: number;
+  end_paragraph_index: number;
+};
+
 type ChapterRecord = {
   chapter_index: number;
   title: string;
   start_paragraph_index: number;
   end_paragraph_index: number;
+  parts: ChapterPartRecord[];
 };
 
 type ReaderPayload = {
@@ -68,7 +85,7 @@ type ChapterPayload = {
   book_id: number;
   chapter_index: number;
   title: string;
-  paragraphs: ParagraphRecord[];
+  blocks: ChapterBlock[];
 };
 
 type CEFRPartLoadSummary = {
@@ -340,8 +357,10 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
 
 function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) {
   const [book, setBook] = useState<ReaderPayload | null>(null);
-  const [chapterCache, setChapterCache] = useState<Record<number, ParagraphRecord[]>>({});
+  const [chapterCache, setChapterCache] = useState<Record<number, ChapterBlock[]>>({});
   const [selectedChapterIndex, setSelectedChapterIndex] = useState<number>(0);
+  const [selectedPartIndex, setSelectedPartIndex] = useState<number | null>(null);
+  const [dialogImage, setDialogImage] = useState<ImageRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
@@ -354,11 +373,30 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   const shouldRestoreScrollRef = useRef<boolean>(false);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
-  const currentParagraphs = chapterCache[selectedChapterIndex] ?? [];
+  const currentBlocks = chapterCache[selectedChapterIndex] ?? [];
+  const visibleBlocks =
+    selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex]
+      ? filterBlocksForPart(currentBlocks, currentChapter.parts[selectedPartIndex])
+      : currentBlocks;
+  const currentParagraphs = visibleBlocks.flatMap((block) => (block.kind === "paragraph" ? [block.paragraph] : []));
+  const isImageOnlyView = visibleBlocks.length > 0 && visibleBlocks.every((block) => block.kind === "image");
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
   }, [currentParagraphs]);
+
+  useEffect(() => {
+    if (!dialogImage) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDialogImage(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dialogImage]);
 
   useEffect(() => {
     let active = true;
@@ -377,9 +415,11 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
           return;
         }
         const initialChapterIndex = findChapterIndex(nextBook.chapters, nextBook.progress.last_paragraph_index);
+        const initialChapter = nextBook.chapters[initialChapterIndex] ?? null;
         shouldRestoreScrollRef.current = true;
         lastSavedRef.current = nextBook.progress.last_paragraph_index;
         setSelectedChapterIndex(initialChapterIndex);
+        setSelectedPartIndex(initialChapter ? findPartIndex(initialChapter.parts, nextBook.progress.last_paragraph_index) : null);
         setBook(nextBook);
       } catch (loadError) {
         if (active) {
@@ -411,7 +451,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
         }
         const payload = (await response.json()) as ChapterPayload;
         if (active) {
-          setChapterCache((current) => ({ ...current, [payload.chapter_index]: payload.paragraphs }));
+          setChapterCache((current) => ({ ...current, [payload.chapter_index]: payload.blocks }));
         }
       } catch (loadError) {
         if (active) {
@@ -469,7 +509,12 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   };
 
   useEffect(() => {
-    if (!book || !currentChapter || !currentParagraphs.length) {
+    if (!book || !currentChapter) {
+      return;
+    }
+    if (!currentParagraphs.length) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+      shouldRestoreScrollRef.current = false;
       return;
     }
     if (shouldRestoreScrollRef.current) {
@@ -573,22 +618,43 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
             </div>
             <nav className="chapter-list" aria-label="Book chapters">
               {book.chapters.map((chapter) => (
-                <button
-                  key={chapter.chapter_index}
-                  className={`chapter-link ${chapter.chapter_index === selectedChapterIndex ? "active" : ""}`}
-                  onClick={() => {
-                    shouldRestoreScrollRef.current = false;
-                    setSelectedChapterIndex(chapter.chapter_index);
-                  }}
-                >
-                  {chapter.title}
-                </button>
+                <div key={chapter.chapter_index} className="chapter-item">
+                  <button
+                    className={`chapter-link ${chapter.chapter_index === selectedChapterIndex ? "active" : ""}`}
+                    onClick={() => {
+                      shouldRestoreScrollRef.current = false;
+                      setSelectedChapterIndex(chapter.chapter_index);
+                      setSelectedPartIndex(null);
+                    }}
+                  >
+                    {chapter.title}
+                  </button>
+                  {chapter.chapter_index === selectedChapterIndex && chapter.parts.length > 1 ? (
+                    <div className="chapter-part-list">
+                      {chapter.parts.map((part) => (
+                        <button
+                          key={`${chapter.chapter_index}-${part.part_index}`}
+                          className={`chapter-part-link ${
+                            chapter.chapter_index === selectedChapterIndex && part.part_index === selectedPartIndex ? "active" : ""
+                          }`}
+                          onClick={() => {
+                            shouldRestoreScrollRef.current = false;
+                            setSelectedChapterIndex(chapter.chapter_index);
+                            setSelectedPartIndex(part.part_index);
+                          }}
+                        >
+                          {part.title}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               ))}
             </nav>
           </aside>
 
           <div className="reader-layout">
-            <article className="reader-paper">
+            <article className={`reader-paper ${isImageOnlyView ? "reader-paper-image-only" : ""}`}>
               <div className="reader-legend">
                 {LEVEL_LABELS.map((level) => (
                   <span key={level} className={`legend-pill level-${level.toLowerCase()}`}>
@@ -602,33 +668,61 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                 {loadingPartIndex !== null ? <span className="legend-pill neutral">Loading current section...</span> : null}
               </div>
 
-              <div className="chapter-heading">
+              <div className={`chapter-heading ${isImageOnlyView ? "chapter-heading-image-only" : ""}`}>
                 <p className="eyebrow">Current chapter</p>
                 <h2>{currentChapter?.title || "Loading..."}</h2>
+                {selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex] ? (
+                  <p className="chapter-part-label">{currentChapter.parts[selectedPartIndex].title}</p>
+                ) : null}
               </div>
 
-              {currentParagraphs.map((paragraph, index) => (
-                <p
-                  key={paragraph.paragraph_index}
-                  ref={(node) => {
-                    paragraphRefs.current[index] = node;
-                  }}
-                  className="reader-paragraph"
-                  data-paragraph-index={paragraph.paragraph_index}
-                >
-                  {paragraph.tokens.map((token) => (
-                    <span
-                      key={token.token_index}
-                      className={token.cefr_level ? `reader-token level-${token.cefr_level.toLowerCase()}` : "reader-token"}
-                      title={token.oxford_tip || ""}
-                    >
-                      {token.text}
-                    </span>
-                  ))}
-                </p>
-              ))}
+              {visibleBlocks.map((block) =>
+                block.kind === "image" ? (
+                  <figure key={block.image.src} className={`reader-figure ${isImageOnlyView ? "reader-figure-contained" : ""}`}>
+                    <img
+                      className={`reader-image ${isImageOnlyView ? "reader-image-contained" : ""}`}
+                      src={block.image.src}
+                      alt={block.image.alt || currentChapter?.title || ""}
+                      onClick={() => setDialogImage(block.image)}
+                    />
+                  </figure>
+                ) : (
+                  <p
+                    key={block.paragraph.paragraph_index}
+                    ref={(node) => {
+                      const paragraphIndex = currentParagraphs.findIndex(
+                        (paragraph) => paragraph.paragraph_index === block.paragraph.paragraph_index,
+                      );
+                      paragraphRefs.current[paragraphIndex] = node;
+                    }}
+                    className="reader-paragraph"
+                    data-paragraph-index={block.paragraph.paragraph_index}
+                  >
+                    {block.paragraph.tokens.map((token) => (
+                      <span
+                        key={token.token_index}
+                        className={token.cefr_level ? `reader-token level-${token.cefr_level.toLowerCase()}` : "reader-token"}
+                        title={token.oxford_tip || ""}
+                      >
+                        {token.text}
+                      </span>
+                    ))}
+                  </p>
+                ),
+              )}
             </article>
           </div>
+        </div>
+      ) : null}
+
+      {dialogImage ? (
+        <div className="image-dialog-backdrop" onClick={() => setDialogImage(null)} role="presentation">
+          <dialog className="image-dialog" open onClick={(event) => event.stopPropagation()}>
+            <button className="image-dialog-close" onClick={() => setDialogImage(null)} aria-label="Close image view">
+              Close
+            </button>
+            <img className="image-dialog-image" src={dialogImage.src} alt={dialogImage.alt || currentChapter?.title || ""} />
+          </dialog>
         </div>
       ) : null}
     </main>
@@ -665,13 +759,17 @@ function mergePartSummary(current: ReaderPayload | null, payload: CEFRPartLoadSu
 }
 
 function mergePartIntoChapters(
-  current: Record<number, ParagraphRecord[]>,
+  current: Record<number, ChapterBlock[]>,
   payload: CEFRPartLoadSummary,
-): Record<number, ParagraphRecord[]> {
+): Record<number, ChapterBlock[]> {
   const paragraphMap = new Map(payload.paragraphs.map((paragraph) => [paragraph.paragraph_index, paragraph]));
   const next = { ...current };
-  for (const [chapterIndex, paragraphs] of Object.entries(current)) {
-    next[Number(chapterIndex)] = paragraphs.map((paragraph) => paragraphMap.get(paragraph.paragraph_index) ?? paragraph);
+  for (const [chapterIndex, blocks] of Object.entries(current)) {
+    next[Number(chapterIndex)] = blocks.map((block) =>
+      block.kind === "paragraph"
+        ? { ...block, paragraph: paragraphMap.get(block.paragraph.paragraph_index) ?? block.paragraph }
+        : block,
+    );
   }
   return next;
 }
@@ -697,6 +795,30 @@ function findChapterIndex(chapters: ChapterRecord[], paragraphIndex: number): nu
     (item) => paragraphIndex >= item.start_paragraph_index && paragraphIndex <= item.end_paragraph_index,
   );
   return chapter?.chapter_index ?? 0;
+}
+
+function findPartIndex(parts: ChapterPartRecord[], paragraphIndex: number): number | null {
+  const part = parts.find((item) => paragraphIndex >= item.start_paragraph_index && paragraphIndex <= item.end_paragraph_index);
+  return part ? part.part_index : null;
+}
+
+function filterBlocksForPart(blocks: ChapterBlock[], part: ChapterPartRecord): ChapterBlock[] {
+  const visible: ChapterBlock[] = [];
+  const pendingImages: ChapterBlock[] = [];
+  for (const block of blocks) {
+    if (block.kind === "image") {
+      pendingImages.push(block);
+      continue;
+    }
+    const inPart =
+      block.paragraph.paragraph_index >= part.start_paragraph_index &&
+      block.paragraph.paragraph_index <= part.end_paragraph_index;
+    if (inPart) {
+      visible.push(...pendingImages, block);
+    }
+    pendingImages.length = 0;
+  }
+  return visible;
 }
 
 function migrateHashRoute() {

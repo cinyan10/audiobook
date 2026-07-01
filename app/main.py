@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from io import BytesIO
+import mimetypes
 from pathlib import Path
+import posixpath
+import sys
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:
+    fallback_site_packages = Path(sys.base_prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if fallback_site_packages.exists():
+        sys.path.append(str(fallback_site_packages))
+    from PIL import Image
 
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, save_progress, scan_books_directory, store_uploaded_book
+from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, save_progress, scan_books_directory, store_uploaded_book
 from app.schemas import BookSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
@@ -43,6 +55,29 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def transparent_illustration_asset(content: bytes, asset_path: str) -> tuple[bytes, str] | None:
+    basename = posixpath.basename(asset_path)
+    if not (basename.startswith("Art_P") and basename.lower().endswith(".jpg")):
+        return None
+
+    image = Image.open(BytesIO(content)).convert("RGBA")
+    converted: list[tuple[int, int, int, int]] = []
+    for red, green, blue, _ in image.getdata():
+        lightest = min(red, green, blue)
+        if lightest >= 245:
+            alpha = 0
+        elif lightest >= 220:
+            alpha = max(0, min(255, int((245 - lightest) * (255 / 25))))
+        else:
+            alpha = 255
+        converted.append((red, green, blue, alpha))
+    image.putdata(converted)
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue(), "image/png"
 
 
 @app.get("/api/books", response_model=list[BookSummary])
@@ -90,6 +125,33 @@ def get_book_chapter(
     if payload is None:
         raise HTTPException(status_code=404, detail="Chapter not found.")
     return payload
+
+
+@app.get("/api/books/{book_id}/assets/{chapter_index}/{asset_href:path}")
+def get_book_chapter_asset(
+    book_id: Annotated[int, PathParam(ge=1)],
+    chapter_index: Annotated[int, PathParam(ge=0)],
+    asset_href: str,
+) -> Response:
+    with get_connection() as connection:
+        payload = get_book_asset(connection, book_id, chapter_index, asset_href)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Asset not found.")
+    content, asset_path = payload
+    transparent_asset = transparent_illustration_asset(content, asset_path)
+    if transparent_asset is not None:
+        transparent_content, media_type = transparent_asset
+        return Response(
+            content=transparent_content,
+            media_type=media_type,
+            headers={"Cache-Control": "no-store"},
+        )
+    media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/books/{book_id}/cefr-parts/{part_index}/load", response_model=CEFRPartLoadSummary)

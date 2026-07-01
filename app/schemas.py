@@ -42,6 +42,17 @@ class ParagraphRecord(BaseModel):
     tokens: list[TokenRecord]
 
 
+class ImageRecord(BaseModel):
+    src: str
+    alt: str = ""
+
+
+class ChapterBlockRecord(BaseModel):
+    kind: str
+    paragraph: ParagraphRecord | None = None
+    image: ImageRecord | None = None
+
+
 class CEFRPartRecord(BaseModel):
     part_index: int
     start_paragraph_index: int
@@ -49,11 +60,19 @@ class CEFRPartRecord(BaseModel):
     status: str
 
 
+class ChapterPartRecord(BaseModel):
+    part_index: int
+    title: str
+    start_paragraph_index: int
+    end_paragraph_index: int
+
+
 class ChapterRecord(BaseModel):
     chapter_index: int
     title: str
     start_paragraph_index: int
     end_paragraph_index: int
+    parts: list[ChapterPartRecord]
 
 
 class CEFRSummary(BaseModel):
@@ -78,7 +97,7 @@ class ChapterPayload(BaseModel):
     book_id: int
     chapter_index: int
     title: str
-    paragraphs: list[ParagraphRecord]
+    blocks: list[ChapterBlockRecord]
 
 
 class ScanSummary(BaseModel):

@@ -4,9 +4,11 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+import re
+from urllib.parse import quote, unquote
 
 from app.cefr import MAX_CEFR_CHARS, fetch_paragraph_tokens, normalize_text, plain_tokens
-from app.epub import read_epub, slugify
+from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugify
 
 
 CEFR_FETCH_LOCK = threading.Lock()
@@ -14,6 +16,18 @@ CEFR_FETCH_LOCK = threading.Lock()
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def is_redundant_title_paragraph(book_title: str, paragraph_text: str) -> bool:
+    return normalize_display_text(book_title) == normalize_display_text(paragraph_text)
+
+
+def is_divider_paragraph(paragraph_text: str) -> bool:
+    return " ".join(paragraph_text.split()).upper() == "X X X"
+
+
+def normalize_display_text(text: str) -> str:
+    return " ".join(text.replace("’", "'").split()).strip().lower()
 
 
 def build_cefr_parts(paragraphs: list[str], max_chars: int = MAX_CEFR_CHARS) -> list[tuple[int, int]]:
@@ -269,11 +283,15 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
     ).fetchone()
     chapter_rows = connection.execute(
         """
-        SELECT chapter_index, title, start_paragraph_index, end_paragraph_index
+        SELECT chapter_index, title, source_href, start_paragraph_index, end_paragraph_index
         FROM book_chapters
         WHERE book_id = ?
         ORDER BY chapter_index
         """,
+        (book_id,),
+    ).fetchall()
+    paragraph_rows = connection.execute(
+        "SELECT paragraph_index, text FROM book_paragraphs WHERE book_id = ? ORDER BY paragraph_index",
         (book_id,),
     ).fetchall()
     parts = connection.execute(
@@ -293,6 +311,7 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
     progress_total = max(total_paragraphs, 1)
     last_paragraph_index = int(progress_row["last_paragraph_index"]) if progress_row else 0
     ready_parts = sum(1 for part in parts if part["status"] == "ready")
+    grouped_chapters = build_reader_chapters(chapter_rows, paragraph_rows)
     return {
         "id": book["id"],
         "title": book["title"],
@@ -309,8 +328,9 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
                 "title": chapter["title"],
                 "start_paragraph_index": chapter["start_paragraph_index"],
                 "end_paragraph_index": chapter["end_paragraph_index"],
+                "parts": chapter["parts"],
             }
-            for chapter in chapter_rows
+            for chapter in grouped_chapters
         ],
         "cefr_parts": [
             {
@@ -332,57 +352,43 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
 
 
 def get_chapter_payload(connection: sqlite3.Connection, book_id: int, chapter_index: int) -> dict[str, object] | None:
-    chapter = connection.execute(
+    raw_chapter_rows = connection.execute(
         """
-        SELECT chapter_index, title, start_paragraph_index, end_paragraph_index
+        SELECT chapter_index, title, source_href, start_paragraph_index, end_paragraph_index
         FROM book_chapters
-        WHERE book_id = ? AND chapter_index = ?
+        WHERE book_id = ?
+        ORDER BY chapter_index
         """,
-        (book_id, chapter_index),
-    ).fetchone()
-    if not chapter:
+        (book_id,),
+    ).fetchall()
+    paragraph_rows = connection.execute(
+        "SELECT paragraph_index, text FROM book_paragraphs WHERE book_id = ? ORDER BY paragraph_index",
+        (book_id,),
+    ).fetchall()
+    chapters = build_reader_chapters(raw_chapter_rows, paragraph_rows)
+    chapter = next((item for item in chapters if int(item["chapter_index"]) == chapter_index), None)
+    if chapter is None:
         return None
-    paragraphs = connection.execute(
+    book = connection.execute("SELECT title, source_path FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        return None
+    blocks: list[dict[str, object]] = []
+    raw_rows = connection.execute(
         """
-        SELECT paragraph_index, text
-        FROM book_paragraphs
-        WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
-        ORDER BY paragraph_index
+        SELECT chapter_index, title, source_href, start_paragraph_index, end_paragraph_index
+        FROM book_chapters
+        WHERE book_id = ? AND chapter_index BETWEEN ? AND ?
+        ORDER BY chapter_index
         """,
-        (book_id, chapter["start_paragraph_index"], chapter["end_paragraph_index"]),
+        (book_id, chapter["raw_start_chapter_index"], chapter["raw_end_chapter_index"]),
     ).fetchall()
-    tokens = connection.execute(
-        """
-        SELECT token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip
-        FROM book_tokens
-        WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
-        ORDER BY token_index
-        """,
-        (book_id, chapter["start_paragraph_index"], chapter["end_paragraph_index"]),
-    ).fetchall()
-    tokens_by_paragraph: dict[int, list[dict[str, object]]] = {}
-    for token in tokens:
-        tokens_by_paragraph.setdefault(token["paragraph_index"], []).append(
-            {
-                "token_index": token["token_index"],
-                "text": token["text"],
-                "normalized_text": token["normalized_text"],
-                "cefr_level": token["cefr_level"],
-                "oxford_tip": token["oxford_tip"],
-            }
-        )
+    for raw_row in raw_rows:
+        blocks.extend(build_raw_chapter_blocks(connection, book_id, raw_row, str(book["title"]), Path(str(book["source_path"]))))
     return {
         "book_id": book_id,
         "chapter_index": chapter["chapter_index"],
         "title": chapter["title"],
-        "paragraphs": [
-            {
-                "paragraph_index": paragraph["paragraph_index"],
-                "text": paragraph["text"],
-                "tokens": tokens_by_paragraph.get(paragraph["paragraph_index"], []),
-            }
-            for paragraph in paragraphs
-        ],
+        "blocks": blocks,
     }
 
 
@@ -474,6 +480,9 @@ def get_cefr_part_payload(connection: sqlite3.Connection, book_id: int, part_ind
     ).fetchone()
     if not part:
         raise ValueError(f"Part {part_index} was not found for book {book_id}.")
+    book = connection.execute("SELECT title FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        raise ValueError(f"Book {book_id} does not exist.")
     paragraphs = connection.execute(
         """
         SELECT paragraph_index, text
@@ -523,6 +532,7 @@ def get_cefr_part_payload(connection: sqlite3.Connection, book_id: int, part_ind
                 "tokens": tokens_by_paragraph.get(paragraph["paragraph_index"], []),
             }
             for paragraph in paragraphs
+            if not is_redundant_title_paragraph(str(book["title"]), str(paragraph["text"]))
         ],
         "cefr": {
             "status": cefr_status,
@@ -530,6 +540,182 @@ def get_cefr_part_payload(connection: sqlite3.Connection, book_id: int, part_ind
             "total_parts": int(total_parts["count"] or 0) if total_parts else 0,
         },
     }
+
+
+def get_book_asset(connection: sqlite3.Connection, book_id: int, chapter_index: int, asset_href: str) -> tuple[bytes, str] | None:
+    row = connection.execute(
+        """
+        SELECT b.source_path, c.source_href
+        FROM books b
+        JOIN book_chapters c ON c.book_id = b.id
+        WHERE b.id = ? AND c.chapter_index = ?
+        """,
+        (book_id, chapter_index),
+    ).fetchone()
+    if not row:
+        return None
+    return read_epub_asset(Path(str(row["source_path"])), str(row["source_href"]), unquote(asset_href))
+
+
+def build_raw_chapter_blocks(
+    connection: sqlite3.Connection,
+    book_id: int,
+    raw_chapter_row: sqlite3.Row,
+    book_title: str,
+    source_path: Path,
+) -> list[dict[str, object]]:
+    paragraphs = connection.execute(
+        """
+        SELECT paragraph_index, text
+        FROM book_paragraphs
+        WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
+        ORDER BY paragraph_index
+        """,
+        (book_id, raw_chapter_row["start_paragraph_index"], raw_chapter_row["end_paragraph_index"]),
+    ).fetchall()
+    tokens = connection.execute(
+        """
+        SELECT token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip
+        FROM book_tokens
+        WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
+        ORDER BY token_index
+        """,
+        (book_id, raw_chapter_row["start_paragraph_index"], raw_chapter_row["end_paragraph_index"]),
+    ).fetchall()
+    tokens_by_paragraph: dict[int, list[dict[str, object]]] = {}
+    for token in tokens:
+        tokens_by_paragraph.setdefault(token["paragraph_index"], []).append(
+            {
+                "token_index": token["token_index"],
+                "text": token["text"],
+                "normalized_text": token["normalized_text"],
+                "cefr_level": token["cefr_level"],
+                "oxford_tip": token["oxford_tip"],
+            }
+        )
+    chapter_blocks = read_epub_chapter_blocks(source_path, str(raw_chapter_row["source_href"]))
+    paragraph_iter = iter(paragraphs)
+    blocks: list[dict[str, object]] = []
+    for block in chapter_blocks:
+        if block.kind == "image":
+            if "Art_orn" in block.image_src:
+                if next(paragraph_iter, None) is None:
+                    continue
+            blocks.append(
+                {
+                    "kind": "image",
+                    "image": {
+                        "src": f"/api/books/{book_id}/assets/{raw_chapter_row['chapter_index']}/{quote(block.image_src, safe='')}",
+                        "alt": block.alt,
+                    },
+                }
+            )
+            continue
+        paragraph = next(paragraph_iter, None)
+        display_text = block.text
+        if paragraph is None or is_redundant_title_paragraph(book_title, display_text):
+            continue
+        blocks.append(
+            {
+                "kind": "paragraph",
+                "paragraph": {
+                    "paragraph_index": paragraph["paragraph_index"],
+                    "text": display_text,
+                    "tokens": tokens_by_paragraph.get(paragraph["paragraph_index"], []),
+                },
+            }
+        )
+    return blocks
+
+
+def build_reader_chapters(raw_chapter_rows: list[sqlite3.Row], paragraph_rows: list[sqlite3.Row]) -> list[dict[str, object]]:
+    paragraph_text_by_index = {int(row["paragraph_index"]): str(row["text"]) for row in paragraph_rows}
+    groups: list[dict[str, object]] = []
+    for row in raw_chapter_rows:
+        group_key = chapter_group_key(str(row["title"]), str(row["source_href"]))
+        if group_key is None:
+            continue
+        if not groups or groups[-1]["group_key"] != group_key:
+            groups.append(
+                {
+                    "group_key": group_key,
+                    "title": chapter_group_title(str(row["title"]), str(row["source_href"])),
+                    "raw_rows": [row],
+                }
+            )
+        else:
+            groups[-1]["raw_rows"].append(row)
+
+    chapters: list[dict[str, object]] = []
+    for section_index, group in enumerate(groups):
+        raw_rows = group["raw_rows"]
+        start_paragraph_index = int(raw_rows[0]["start_paragraph_index"])
+        end_paragraph_index = int(raw_rows[-1]["end_paragraph_index"])
+        parts = build_chapter_parts(start_paragraph_index, end_paragraph_index, paragraph_text_by_index)
+        chapters.append(
+            {
+                "chapter_index": section_index,
+                "title": group["title"],
+                "start_paragraph_index": start_paragraph_index,
+                "end_paragraph_index": end_paragraph_index,
+                "parts": parts,
+                "raw_start_chapter_index": int(raw_rows[0]["chapter_index"]),
+                "raw_end_chapter_index": int(raw_rows[-1]["chapter_index"]),
+            }
+        )
+    return chapters
+
+
+def build_chapter_parts(
+    start_paragraph_index: int,
+    end_paragraph_index: int,
+    paragraph_text_by_index: dict[int, str],
+) -> list[dict[str, object]]:
+    parts: list[dict[str, object]] = []
+    current_start = start_paragraph_index
+    for paragraph_index in range(start_paragraph_index, end_paragraph_index + 1):
+        if paragraph_index == current_start:
+            continue
+        if is_divider_paragraph(paragraph_text_by_index.get(paragraph_index, "")):
+            parts.append(
+                {
+                    "part_index": len(parts),
+                    "title": f"Part {len(parts) + 1}",
+                    "start_paragraph_index": current_start,
+                    "end_paragraph_index": paragraph_index - 1,
+                }
+            )
+            current_start = paragraph_index
+    if end_paragraph_index >= current_start:
+        parts.append(
+            {
+                "part_index": len(parts),
+                "title": f"Part {len(parts) + 1}",
+                "start_paragraph_index": current_start,
+                "end_paragraph_index": end_paragraph_index,
+            }
+        )
+    return parts if len(parts) > 1 else []
+
+
+def chapter_group_key(title: str, source_href: str) -> str | None:
+    stem = Path(source_href).stem.lower()
+    if stem in {"toc", "newslettersignup"}:
+        return None
+    if stem.startswith("insert"):
+        return "insert"
+    if re.match(r"prologue(?:_[a-z])?$", stem):
+        return "prologue"
+    if re.match(r"chapter\d{3}(?:_[a-z])?$", stem):
+        return stem.split("_", 1)[0]
+    return stem
+
+
+def chapter_group_title(title: str, source_href: str) -> str:
+    stem = Path(source_href).stem.lower()
+    if stem.startswith("insert"):
+        return "Insert"
+    return title
 
 
 def update_book_cefr_status(connection: sqlite3.Connection, book_id: int) -> str:
