@@ -643,20 +643,22 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [book, dialogImage, selectedChapterIndex, selectedPartIndex]);
 
-  const completedLabel = book ? `${book.progress.percent.toFixed(1)}% through the book` : "";
+  const progressLabel = book ? `${book.progress.percent.toFixed(1)}%` : "0.0%";
 
   return (
     <main className="reader-shell">
-      <header className="reader-header">
+      <nav className="reader-header" aria-label="Reader navigation">
         <button className="back-link" onClick={onBack}>
-          Library
+          Home
         </button>
         <div className="reader-title-block">
-          <p className="eyebrow">Reading view</p>
           <h1>{loading ? "Loading..." : book?.title}</h1>
-          {!loading && book ? <p>{book.author || "Unknown author"} · {completedLabel}</p> : null}
         </div>
-      </header>
+        <div className="reader-progress" aria-label={`Reading progress ${progressLabel}`}>
+          <ProgressRing percent={book?.progress.percent ?? 0} label={progressLabel} />
+          <span>{progressLabel}</span>
+        </div>
+      </nav>
 
       {error ? <p className="error-banner">{error}</p> : null}
 

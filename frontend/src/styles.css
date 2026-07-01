@@ -99,12 +99,12 @@ code {
 }
 
 .reader-header {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 1rem;
-  border-radius: 24px;
-  padding: 1rem 1.25rem;
+  border-radius: 999px;
+  padding: 0.7rem 0.9rem;
 }
 
 .eyebrow {
@@ -124,7 +124,34 @@ code {
 }
 
 .reader-title-block h1 {
-  font-size: clamp(2rem, 3vw, 3rem);
+  overflow: hidden;
+  font-size: clamp(1rem, 2vw, 1.25rem);
+  line-height: 1.2;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #2d231b;
+  font: 700 0.82rem/1 "Cascadia Code", "SFMono-Regular", monospace;
+}
+
+.reader-progress .progress-ring {
+  width: 2.6rem;
+  height: 2.6rem;
+}
+
+.reader-progress .progress-ring-track,
+.reader-progress .progress-ring-fill {
+  stroke-width: 7;
+}
+
+.reader-progress .progress-ring text {
+  display: none;
 }
 
 .lede,
@@ -682,7 +709,13 @@ code {
 
   .reader-header {
     position: static;
-    flex-direction: column;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.55rem;
+    padding: 0.55rem;
+  }
+
+  .reader-progress span {
+    display: none;
   }
 
   .reader-layout {
