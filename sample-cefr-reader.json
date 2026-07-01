@@ -1,0 +1,206 @@
+[
+  {
+    "text": "This",
+    "level": "A1",
+    "tip": "det=A1; adv=B1",
+    "className": "a1_ul"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "is",
+    "level": "A1",
+    "tip": "v=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "a",
+    "level": "A1",
+    "tip": "article=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "simple",
+    "level": "A2",
+    "tip": "adj=A2",
+    "className": "a2"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "book",
+    "level": "A1",
+    "tip": "n=A1; v=A2",
+    "className": "a1_ul"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "for",
+    "level": "A1",
+    "tip": "prep=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "children",
+    "level": "A1",
+    "tip": "n=A1",
+    "className": "a1"
+  },
+  {
+    "text": ".",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "Nevertheless",
+    "level": "B2",
+    "tip": "adv=B2",
+    "className": "b2"
+  },
+  {
+    "text": ",",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "the",
+    "level": "A1",
+    "tip": "article=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "protagonist",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "contemplated",
+    "level": "C1",
+    "tip": "v=C1",
+    "className": "c1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "whether",
+    "level": "B1",
+    "tip": "conj=B1",
+    "className": "b1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "the",
+    "level": "A1",
+    "tip": "article=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "consequences",
+    "level": "B1",
+    "tip": "n=B1",
+    "className": "b1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "were",
+    "level": "A1",
+    "tip": "v=A1",
+    "className": "a1"
+  },
+  {
+    "text": " ",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": "irreversible",
+    "level": "",
+    "tip": "",
+    "className": ""
+  },
+  {
+    "text": ".",
+    "level": "",
+    "tip": "",
+    "className": ""
+  }
+]

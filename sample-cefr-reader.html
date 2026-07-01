@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oxford CEFR Reader</title>
+<style>
+:root {
+  color-scheme: light;
+  font-family: Georgia, serif;
+}
+body {
+  margin: 0;
+  background: #f6f1e8;
+  color: #222;
+}
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 40px 20px 64px;
+}
+h1 {
+  margin: 0 0 8px;
+  font: 700 2rem/1.1 Georgia, serif;
+}
+p {
+  margin: 0 0 24px;
+  color: #5a5247;
+}
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  font: 700 0.95rem/1.2 system-ui, sans-serif;
+}
+.reader {
+  padding: 28px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.8);
+  box-shadow: 0 18px 50px rgba(80, 56, 24, 0.12);
+  font-size: 1.35rem;
+  line-height: 1.9;
+  white-space: pre-wrap;
+}
+.token {
+  transition: background-color 0.15s ease;
+}
+.token:hover {
+  background: rgba(0,0,0,0.08);
+}
+.source {
+  margin-top: 18px;
+  font: 0.9rem/1.4 system-ui, sans-serif;
+}
+</style>
+<main>
+  <h1>Oxford CEFR Reader</h1>
+  <p>Colored with Oxford Text Checker output. Hover a word to see the part of speech and CEFR tag Oxford returned.</p>
+  <div class="legend"><span class="legend-item" style="color:#0069b4">A1</span><span class="legend-item" style="color:#c91352">A2</span><span class="legend-item" style="color:#b95b0b">B1</span><span class="legend-item" style="color:#1a873b">B2</span><span class="legend-item" style="color:#964db0">C1</span></div>
+  <div class="reader"><span class="token a1" data-tip="det=A1; adv=B1" title="det=A1; adv=B1" style="color:#0069b4">This</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="v=A1" title="v=A1" style="color:#0069b4">is</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="article=A1" title="article=A1" style="color:#0069b4">a</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a2" data-tip="adj=A2" title="adj=A2" style="color:#c91352">simple</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="n=A1; v=A2" title="n=A1; v=A2" style="color:#0069b4">book</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="prep=A1" title="prep=A1" style="color:#0069b4">for</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="n=A1" title="n=A1" style="color:#0069b4">children</span><span class="token " data-tip="" title="" style="color:#222">.</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token b2" data-tip="adv=B2" title="adv=B2" style="color:#1a873b">Nevertheless</span><span class="token " data-tip="" title="" style="color:#222">,</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="article=A1" title="article=A1" style="color:#0069b4">the</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token " data-tip="" title="" style="color:#222">protagonist</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token c1" data-tip="v=C1" title="v=C1" style="color:#964db0">contemplated</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token b1" data-tip="conj=B1" title="conj=B1" style="color:#b95b0b">whether</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="article=A1" title="article=A1" style="color:#0069b4">the</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token b1" data-tip="n=B1" title="n=B1" style="color:#b95b0b">consequences</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token a1" data-tip="v=A1" title="v=A1" style="color:#0069b4">were</span><span class="token " data-tip="" title="" style="color:#222"> </span><span class="token " data-tip="" title="" style="color:#222">irreversible</span><span class="token " data-tip="" title="" style="color:#222">.</span></div>
+  <div class="source">Source text length: 122 characters.</div>
+</main>
+</html>

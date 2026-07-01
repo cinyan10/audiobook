@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import re
+import shutil
+
+from oxford_cefr import LEVEL_COLORS, fetch_tokens
+
+
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*")
+MAX_CEFR_CHARS = 4000
+
+
+def can_fetch_cefr() -> bool:
+    return shutil.which("playwright-cli") is not None
+
+
+def normalize_text(text: str) -> str:
+    stripped = text.strip().replace("’", "'").lower()
+    return stripped if WORD_RE.fullmatch(stripped) else ""
+
+
+def plain_tokens(text: str) -> list[dict[str, str]]:
+    pattern = re.compile(r"\s+|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*|[^\w\s]", re.UNICODE)
+    tokens: list[dict[str, str]] = []
+    position = 0
+    for match in pattern.finditer(text):
+        if match.start() > position:
+            tokens.append({"text": text[position : match.start()], "level": "", "tip": ""})
+        tokens.append({"text": match.group(0), "level": "", "tip": ""})
+        position = match.end()
+    if position < len(text):
+        tokens.append({"text": text[position:], "level": "", "tip": ""})
+    return tokens
+
+
+def fetch_paragraph_tokens(paragraphs: list[str]) -> list[list[dict[str, str]]]:
+    if not paragraphs:
+        return []
+    if not can_fetch_cefr():
+        raise RuntimeError("playwright-cli is not available for Oxford CEFR checks.")
+
+    all_tokens: list[list[dict[str, str]]] = []
+    for chunk in _paragraph_chunks(paragraphs):
+        joined = "\n\n".join(chunk)
+        tokens = fetch_tokens(joined)
+        if "".join(token["text"] for token in tokens) == joined:
+            all_tokens.extend(_split_tokens_by_paragraph(tokens, chunk))
+            continue
+        # ponytail: fallback to per-paragraph fetch when Oxford normalizes chunk separators.
+        all_tokens.extend(_fetch_paragraphs_individually(chunk))
+    return all_tokens
+
+
+def _fetch_paragraphs_individually(paragraphs: list[str]) -> list[list[dict[str, str]]]:
+    grouped: list[list[dict[str, str]]] = []
+    for paragraph in paragraphs:
+        tokens = fetch_tokens(paragraph)
+        if "".join(token["text"] for token in tokens) != paragraph:
+            raise RuntimeError("Oxford tokens did not match source text.")
+        grouped.append(tokens)
+    return grouped
+
+
+def _paragraph_chunks(paragraphs: list[str], max_chars: int = MAX_CEFR_CHARS) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_size = 0
+    for paragraph in paragraphs:
+        separator = 2 if current else 0
+        if current and current_size + separator + len(paragraph) > max_chars:
+            chunks.append(current)
+            current = [paragraph]
+            current_size = len(paragraph)
+            continue
+        current.append(paragraph)
+        current_size += separator + len(paragraph)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _split_tokens_by_paragraph(tokens: list[dict[str, str]], paragraphs: list[str]) -> list[list[dict[str, str]]]:
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for index, paragraph in enumerate(paragraphs):
+        start = cursor
+        end = start + len(paragraph)
+        spans.append((start, end))
+        cursor = end + (2 if index < len(paragraphs) - 1 else 0)
+
+    grouped: list[list[dict[str, str]]] = [[] for _ in paragraphs]
+    paragraph_index = 0
+    absolute = 0
+    for token in tokens:
+        token_text = token["text"]
+        token_start = absolute
+        token_end = token_start + len(token_text)
+        absolute = token_end
+
+        while paragraph_index < len(spans) and token_start >= spans[paragraph_index][1]:
+            paragraph_index += 1
+
+        local_cursor = token_start
+        while paragraph_index < len(spans) and local_cursor < token_end:
+            span_start, span_end = spans[paragraph_index]
+            if local_cursor < span_start:
+                local_cursor = min(span_start, token_end)
+                if local_cursor >= token_end:
+                    break
+            overlap_start = max(local_cursor, span_start)
+            overlap_end = min(token_end, span_end)
+            if overlap_start < overlap_end:
+                piece = token_text[overlap_start - token_start : overlap_end - token_start]
+                grouped[paragraph_index].append(
+                    {
+                        "text": piece,
+                        "level": token.get("level", ""),
+                        "tip": token.get("tip", ""),
+                    }
+                )
+            local_cursor = overlap_end if overlap_end > local_cursor else token_end
+            if local_cursor >= span_end:
+                paragraph_index += 1
+    return grouped
