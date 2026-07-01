@@ -11,6 +11,8 @@ Build a single project that includes both:
 - a web-based book reader for learners
 - a backend pipeline that generates high-quality book audio and timing metadata
 
+The first version is a local app that runs on a user's own machine for their personal use.
+
 The product helps learners read English books with optional audio playback, Oxford CEFR word coloring, and word-level playback highlighting.
 
 ## Primary User Value
@@ -38,6 +40,7 @@ The product helps learners read English books with optional audio playback, Oxfo
 ### Out of Scope For V1
 
 - User accounts and multi-device sync
+- Hosted multi-user deployment
 - Mobile apps
 - Social features
 - Notes sharing
@@ -48,7 +51,7 @@ The product helps learners read English books with optional audio playback, Oxfo
 
 ### Primary User
 
-An English learner reading books in the browser, sometimes with audio and sometimes silently.
+An English learner running the app locally on their own machine, reading books in the browser, sometimes with audio and sometimes silently.
 
 ## Core User Stories
 
@@ -184,6 +187,7 @@ An English learner reading books in the browser, sometimes with audio and someti
 
 ## Non-Functional Requirements
 
+- The first version must run locally on a user's machine without requiring a hosted backend.
 - Reader should load fast for a normal-length book.
 - Playback and current-word highlighting should feel responsive.
 - The product must remain usable without audio assets.
@@ -242,6 +246,7 @@ An English learner reading books in the browser, sometimes with audio and someti
 
 ## Assumptions
 
+- The first release is a personal local-use app, not a shared cloud product.
 - High-quality audio generation belongs inside this project rather than in an external companion service.
 - Audio quality should continue to come from the generation pipeline rather than browser TTS.
 - Word-level highlighting will depend on a post-generation alignment step.
