@@ -1,11 +1,11 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   background:
-    radial-gradient(circle at top left, rgba(186, 150, 117, 0.14), transparent 28%),
-    radial-gradient(circle at top right, rgba(92, 103, 114, 0.18), transparent 22%),
-    linear-gradient(180deg, #171616 0%, #1d1c1d 48%, #121112 100%);
-  color: #f2ede6;
+    radial-gradient(circle at top left, rgba(194, 150, 110, 0.18), transparent 34%),
+    radial-gradient(circle at top right, rgba(101, 126, 110, 0.2), transparent 24%),
+    linear-gradient(180deg, #f3eadc 0%, #efe5d4 42%, #f6f0e6 100%);
+  color: #241b15;
 }
 
 * {
@@ -16,7 +16,7 @@ body {
   margin: 0;
   min-height: 100vh;
   background: transparent;
-  color: #f2ede6;
+  color: #241b15;
 }
 
 button,
@@ -53,13 +53,13 @@ code {
 .ambient-left {
   top: -4rem;
   left: -6rem;
-  background: rgba(122, 92, 65, 0.34);
+  background: rgba(194, 150, 110, 0.3);
 }
 
 .ambient-right {
   top: 10rem;
   right: -8rem;
-  background: rgba(64, 82, 94, 0.22);
+  background: rgba(90, 126, 113, 0.22);
 }
 
 .page,
@@ -810,10 +810,10 @@ code {
   aspect-ratio: 0.68;
   overflow: hidden;
   border-radius: 6px;
-  background: rgba(52, 50, 50, 0.94);
+  background: rgba(255, 251, 246, 0.92);
   box-shadow:
-    0 18px 30px rgba(0, 0, 0, 0.22),
-    0 1px 0 rgba(255, 255, 255, 0.06) inset;
+    0 18px 30px rgba(88, 65, 42, 0.16),
+    0 1px 0 rgba(255, 255, 255, 0.6) inset;
   transition: transform 180ms ease, box-shadow 180ms ease, filter 180ms ease;
 }
 
@@ -821,9 +821,9 @@ code {
 .library-book:focus-visible .library-cover {
   transform: translateY(-4px);
   box-shadow:
-    0 26px 38px rgba(0, 0, 0, 0.3),
-    0 1px 0 rgba(255, 255, 255, 0.08) inset;
-  filter: brightness(1.02);
+    0 26px 38px rgba(88, 65, 42, 0.2),
+    0 1px 0 rgba(255, 255, 255, 0.78) inset;
+  filter: brightness(1.01);
 }
 
 .library-book:focus-visible {
@@ -832,8 +832,8 @@ code {
 
 .library-book:focus-visible .library-cover {
   box-shadow:
-    0 26px 38px rgba(0, 0, 0, 0.3),
-    0 0 0 2px rgba(248, 243, 232, 0.7);
+    0 26px 38px rgba(88, 65, 42, 0.2),
+    0 0 0 2px rgba(79, 60, 42, 0.3);
 }
 
 .library-cover-image {
@@ -913,12 +913,12 @@ code {
 }
 
 .library-badge.progress {
-  background: rgba(255, 255, 255, 0.12);
-  color: rgba(255, 250, 243, 0.78);
+  background: rgba(36, 27, 21, 0.08);
+  color: rgba(52, 41, 31, 0.72);
 }
 
 .library-book-menu {
-  color: rgba(248, 241, 232, 0.54);
+  color: rgba(92, 77, 62, 0.54);
   font-size: 1.25rem;
   line-height: 1;
   letter-spacing: 0.12em;
@@ -926,9 +926,9 @@ code {
 
 .library-book-add .library-cover {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
-    rgba(40, 39, 39, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.34)),
+    rgba(237, 228, 214, 0.94);
+  border: 1px solid rgba(82, 57, 35, 0.12);
 }
 
 .library-cover-add {
@@ -937,7 +937,7 @@ code {
 }
 
 .library-cover-add span {
-  color: rgba(247, 241, 231, 0.9);
+  color: rgba(63, 48, 34, 0.72);
   font-size: clamp(3.2rem, 7vw, 4.6rem);
   line-height: 1;
 }
@@ -945,8 +945,8 @@ code {
 .library-book-add:hover .library-cover,
 .library-book-add:focus-visible .library-cover {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
-    rgba(52, 51, 51, 0.92);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.42)),
+    rgba(241, 233, 220, 0.98);
 }
 
 .library-book-add.is-uploading .library-cover-add span {
@@ -955,7 +955,7 @@ code {
 
 .library-empty {
   margin: 2rem 0 0;
-  color: rgba(248, 241, 232, 0.64);
+  color: rgba(92, 77, 62, 0.7);
   font-size: 1rem;
 }
 
@@ -963,8 +963,8 @@ code {
   max-width: 36rem;
   margin-top: 0;
   margin-bottom: 1.5rem;
-  background: rgba(164, 35, 64, 0.16);
-  color: #ffd8e3;
+  background: rgba(164, 35, 64, 0.1);
+  color: #7d1732;
 }
 
 @keyframes shelf-enter {
