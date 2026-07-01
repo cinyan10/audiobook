@@ -602,6 +602,47 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     };
   }, [book, currentParagraphs]);
 
+  useEffect(() => {
+    if (!book || dialogImage) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isEditableTarget(event.target)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (!["w", "a", "s", "d"].includes(key)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (key === "w" || key === "s") {
+        const direction = key === "w" ? -1 : 1;
+        window.scrollBy({ top: direction * 160, behavior: "smooth" });
+        return;
+      }
+
+      if (key === "a" && !isNearTop()) {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+
+      const nextPartTarget = findAdjacentPart(book.chapters, selectedChapterIndex, selectedPartIndex, key === "a" ? -1 : 1);
+      if (!nextPartTarget) {
+        return;
+      }
+
+      shouldRestoreScrollRef.current = false;
+      setSelectedChapterIndex(nextPartTarget.chapterIndex);
+      setSelectedPartIndex(nextPartTarget.partIndex);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [book, dialogImage, selectedChapterIndex, selectedPartIndex]);
+
   const completedLabel = book ? `${book.progress.percent.toFixed(1)}% through the book` : "";
 
   return (
@@ -634,7 +675,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                     onClick={() => {
                       shouldRestoreScrollRef.current = false;
                       setSelectedChapterIndex(chapter.chapter_index);
-                      setSelectedPartIndex(null);
+                      setSelectedPartIndex(chapter.parts.length ? chapter.parts[0].part_index : null);
                     }}
                   >
                     {chapter.title}
@@ -829,6 +870,38 @@ function filterBlocksForPart(blocks: ChapterBlock[], part: ChapterPartRecord): C
     pendingImages.length = 0;
   }
   return visible;
+}
+
+function findAdjacentPart(
+  chapters: ChapterRecord[],
+  selectedChapterIndex: number,
+  selectedPartIndex: number | null,
+  offset: -1 | 1,
+): { chapterIndex: number; partIndex: number } | null {
+  const parts = chapters.flatMap((chapter) =>
+    chapter.parts.map((part) => ({ chapterIndex: chapter.chapter_index, partIndex: part.part_index })),
+  );
+  if (!parts.length) {
+    return null;
+  }
+
+  const currentIndex = parts.findIndex(
+    (part) => part.chapterIndex === selectedChapterIndex && part.partIndex === (selectedPartIndex ?? 0),
+  );
+  const anchorIndex = currentIndex >= 0 ? currentIndex : offset > 0 ? -1 : parts.length;
+  const nextIndex = anchorIndex + offset;
+  return nextIndex >= 0 && nextIndex < parts.length ? parts[nextIndex] : null;
+}
+
+function isNearTop(): boolean {
+  return window.scrollY <= 24;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }
 
 function migrateHashRoute() {

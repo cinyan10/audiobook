@@ -8,7 +8,7 @@ from zipfile import ZipFile
 
 from app.db import connect, init_db
 from app.cefr import fetch_paragraph_tokens
-from app.library import enrich_book_part_cefr, get_cefr_job_status, get_reader_payload, import_book, save_progress, scan_books_directory
+from app.library import enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, save_progress, scan_books_directory
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -40,6 +40,13 @@ CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
 </body></html>
 """
 
+ORNAMENT_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>First part.</p>
+<img src="images/Art_orn.jpg" alt="" />
+<p>Second part.</p>
+</body></html>
+"""
+
 
 class Phase1ImportTests(unittest.TestCase):
     def test_import_scan_and_progress(self) -> None:
@@ -63,9 +70,12 @@ class Phase1ImportTests(unittest.TestCase):
             payload = get_reader_payload(connection, int(summary["id"]))
             self.assertIsNotNone(payload)
             assert payload is not None
-            self.assertEqual(len(payload["paragraphs"]), 2)
-            self.assertEqual(payload["paragraphs"][0]["text"], "This is a test paragraph.")
             self.assertEqual(payload["cefr"]["ready_parts"], 0)
+            chapter_payload = get_chapter_payload(connection, int(summary["id"]), 0)
+            self.assertIsNotNone(chapter_payload)
+            assert chapter_payload is not None
+            self.assertEqual(len(chapter_payload["blocks"]), 2)
+            self.assertEqual(chapter_payload["blocks"][0]["paragraph"]["text"], "This is a test paragraph.")
 
             progress = save_progress(connection, int(summary["id"]), 1, None)
             self.assertEqual(progress["last_paragraph_index"], 1)
@@ -100,7 +110,10 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(part_payload["cefr"]["ready_parts"], 1)
             refreshed = get_reader_payload(connection, int(summary["id"]))
             assert refreshed is not None
-            self.assertEqual(refreshed["paragraphs"][0]["tokens"][0]["cefr_level"], "A1")
+            refreshed_chapter = get_chapter_payload(connection, int(summary["id"]), 0)
+            self.assertIsNotNone(refreshed_chapter)
+            assert refreshed_chapter is not None
+            self.assertEqual(refreshed_chapter["blocks"][0]["paragraph"]["tokens"][0]["cefr_level"], "A1")
 
             scanned = scan_books_directory(connection, books_dir)
             self.assertEqual(scanned["skipped"], 1)
@@ -138,11 +151,33 @@ class Phase1ImportTests(unittest.TestCase):
         self.assertEqual("".join(token["text"] for token in grouped[1]), "Second paragraph.")
         self.assertEqual(calls[0], "First paragraph.\n\nSecond paragraph.")
 
-    def _write_epub(self, path: Path) -> None:
+    def test_ornament_divider_is_not_rendered_as_image_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, ORNAMENT_CHAPTER_HTML)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, status = import_book(connection, epub_path)
+            self.assertEqual(status, "imported")
+
+            chapter = get_chapter_payload(connection, int(summary["id"]), 0)
+            assert chapter is not None
+            self.assertEqual([block["kind"] for block in chapter["blocks"]], ["paragraph", "paragraph"])
+            self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "First part.")
+            self.assertEqual(chapter["blocks"][1]["paragraph"]["text"], "Second part.")
+            connection.close()
+
+    def _write_epub(self, path: Path, chapter_html: str = CHAPTER_HTML) -> None:
         with ZipFile(path, "w") as book:
             book.writestr("META-INF/container.xml", CONTAINER_XML)
             book.writestr("OEBPS/content.opf", OPF_XML)
-            book.writestr("OEBPS/chapter1.xhtml", CHAPTER_HTML)
+            book.writestr("OEBPS/chapter1.xhtml", chapter_html)
 
 
 if __name__ == "__main__":

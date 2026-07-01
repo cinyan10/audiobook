@@ -599,8 +599,7 @@ def build_raw_chapter_blocks(
     for block in chapter_blocks:
         if block.kind == "image":
             if "Art_orn" in block.image_src:
-                if next(paragraph_iter, None) is None:
-                    continue
+                continue
             blocks.append(
                 {
                     "kind": "image",
