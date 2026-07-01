@@ -60,6 +60,7 @@ An English learner running the app locally on their own machine, reading books i
 - As a reader, I want to play book audio and see the current spoken word highlighted.
 - As a reader, I want CEFR-colored words so I can judge difficulty while reading.
 - As a reader, I want to double-click a word to open its Oxford definition.
+- As a reader, I want to press Space to show a tooltip with the currently selected word's Oxford definition.
 - As a reader, I want to right-click a word to mark or highlight it for later review.
 - As a reader, I want playback skip controls that feel natural for reading.
 - As an operator, I want this project to generate high-quality audio playback assets for books.
@@ -83,6 +84,7 @@ An English learner running the app locally on their own machine, reading books i
 - The reader must support reading when no audio file exists.
 - The reader must preserve paragraph and sentence structure from the source text.
 - The reader must render words as individually addressable tokens when CEFR or playback metadata exists.
+- The reader must support keyboard word actions for the current text selection.
 
 ### 3. Word Difficulty
 
@@ -99,6 +101,8 @@ An English learner running the app locally on their own machine, reading books i
 ### 4. Word Actions
 
 - Double-clicking a word must open its Oxford definition page.
+- Pressing `Space` with a single word selected must show a tooltip with that word's Oxford definition.
+- The tooltip should appear near the selected word and dismiss on `Escape`, selection change, or clicking elsewhere.
 - Right-clicking a word must open a contextual action menu.
 - The context menu must support:
   - highlight word
