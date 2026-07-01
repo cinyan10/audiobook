@@ -7,6 +7,7 @@ from pathlib import Path
 import posixpath
 import sys
 from typing import Annotated
+from urllib.parse import unquote
 
 from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.cefr import fetch_indexed_paragraph_tokens
+from app.epub import read_epub_zip_asset
 
 try:
     from PIL import Image
@@ -154,6 +156,23 @@ def get_book_chapter_asset(
         media_type=media_type,
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/api/books/{book_id}/cover/{cover_href:path}")
+def get_book_cover(
+    book_id: Annotated[int, PathParam(ge=1)],
+    cover_href: str,
+) -> Response:
+    with get_connection() as connection:
+        book = connection.execute("SELECT source_path, cover_path FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found.")
+    cover_path = str(book["cover_path"] or "")
+    if not cover_path or unquote(cover_href) != cover_path:
+        raise HTTPException(status_code=404, detail="Cover not found.")
+    content, asset_path = read_epub_zip_asset(Path(str(book["source_path"])), cover_path)
+    media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/books/{book_id}/cefr-parts/{part_index}/load", response_model=CEFRPartLoadSummary)

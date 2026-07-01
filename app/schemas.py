@@ -19,6 +19,7 @@ class BookSummary(BaseModel):
     id: int
     title: str
     author: str
+    cover_url: str | None = None
     has_cefr: bool
     cefr_status: str
     cefr_ready_parts: int

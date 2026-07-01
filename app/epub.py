@@ -16,6 +16,7 @@ class ExtractedBook:
     author: str
     paragraphs: list[str]
     chapters: list["ExtractedChapter"]
+    cover_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -76,14 +77,13 @@ def read_epub(path: Path) -> ExtractedBook:
         container = ET.fromstring(book.read("META-INF/container.xml"))
         opf_path = container.find(".//{*}rootfile").attrib["full-path"]
         opf = ET.fromstring(book.read(opf_path))
-        manifest = {
-            item.attrib["id"]: item.attrib["href"]
-            for item in opf.findall(".//{*}manifest/{*}item")
-        }
+        manifest_items = opf.findall(".//{*}manifest/{*}item")
+        manifest = {item.attrib["id"]: item.attrib["href"] for item in manifest_items}
         metadata = opf.find(".//{*}metadata")
         title = _first_metadata_text(metadata, "title") or path.stem
         author = _first_metadata_text(metadata, "creator") or ""
         base = posixpath.dirname(opf_path)
+        cover_path = _find_cover_path(book, opf, manifest_items, manifest, metadata, base)
         chapters: list[ExtractedChapter] = []
         paragraphs: list[str] = []
         chapter_titles = _read_toc_labels(book, opf, base)
@@ -108,7 +108,13 @@ def read_epub(path: Path) -> ExtractedBook:
                 )
             )
 
-    return ExtractedBook(title=title.strip() or path.stem, author=author.strip(), paragraphs=paragraphs, chapters=chapters)
+    return ExtractedBook(
+        title=title.strip() or path.stem,
+        author=author.strip(),
+        paragraphs=paragraphs,
+        chapters=chapters,
+        cover_path=cover_path,
+    )
 
 
 def read_epub_chapter_blocks(path: Path, source_href: str) -> list[ExtractedChapterBlock]:
@@ -128,6 +134,12 @@ def read_epub_asset(path: Path, source_href: str, asset_href: str) -> tuple[byte
         base = posixpath.dirname(opf_path)
         asset_path = posixpath.normpath(posixpath.join(base, posixpath.dirname(source_href), asset_href))
         return book.read(asset_path), asset_path
+
+
+def read_epub_zip_asset(path: Path, asset_path: str) -> tuple[bytes, str]:
+    with ZipFile(path) as book:
+        normalized = posixpath.normpath(asset_path)
+        return book.read(normalized), normalized
 
 
 def slugify(value: str) -> str:
@@ -170,6 +182,71 @@ def _read_toc_labels(book: ZipFile, opf: ET.Element, base: str) -> dict[str, str
 def _fallback_chapter_title(source_href: str, chapter_index: int) -> str:
     stem = Path(source_href).stem.replace("_", " ").replace("-", " ").strip()
     return stem.title() if stem else f"Chapter {chapter_index + 1}"
+
+
+def _find_cover_path(
+    book: ZipFile,
+    opf: ET.Element,
+    manifest_items: list[ET.Element],
+    manifest: dict[str, str],
+    metadata: ET.Element | None,
+    base: str,
+) -> str | None:
+    if metadata is not None:
+        for meta in metadata.findall(".//{*}meta"):
+            if meta.attrib.get("name", "").lower() != "cover":
+                continue
+            cover_id = meta.attrib.get("content", "")
+            candidate = _manifest_href_to_zip_path(manifest.get(cover_id, ""), base)
+            if candidate and _zip_has_file(book, candidate):
+                return candidate
+
+    for item in manifest_items:
+        properties = item.attrib.get("properties", "")
+        if "cover-image" not in properties.split():
+            continue
+        candidate = _manifest_href_to_zip_path(item.attrib.get("href", ""), base)
+        if candidate and _zip_has_file(book, candidate):
+            return candidate
+
+    fallback_names = {"cover", "coverimage", "cover-image"}
+    best_named: str | None = None
+    first_image: str | None = None
+    for item in manifest_items:
+        href = item.attrib.get("href", "")
+        media_type = item.attrib.get("media-type", "")
+        if not media_type.startswith("image/"):
+            continue
+        candidate = _manifest_href_to_zip_path(href, base)
+        if not candidate or not _zip_has_file(book, candidate):
+            continue
+        basename = Path(candidate).stem.lower().replace("-", "").replace("_", "")
+        if basename in fallback_names:
+            return candidate
+        if "cover" in basename and best_named is None:
+            best_named = candidate
+        if first_image is None and not _looks_ornamental(candidate):
+            first_image = candidate
+    return best_named or first_image
+
+
+def _manifest_href_to_zip_path(href: str, base: str) -> str | None:
+    if not href:
+        return None
+    return posixpath.normpath(posixpath.join(base, href))
+
+
+def _zip_has_file(book: ZipFile, path: str) -> bool:
+    try:
+        book.getinfo(path)
+    except KeyError:
+        return False
+    return True
+
+
+def _looks_ornamental(path: str) -> bool:
+    name = Path(path).stem.lower()
+    return any(token in name for token in ("orn", "logo", "icon", "toc", "title", "backcover", "back-cover"))
 
 
 class EpubContentParser(HTMLParser):

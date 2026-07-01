@@ -74,7 +74,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
     stat = path.stat()
     source_path = str(path.resolve())
     existing = connection.execute(
-        "SELECT id, source_mtime, source_size FROM books WHERE source_path = ?",
+        "SELECT id, source_mtime, source_size, cover_path FROM books WHERE source_path = ?",
         (source_path,),
     ).fetchone()
     chapter_count = 0
@@ -85,6 +85,13 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
         ).fetchone()
         chapter_count = int(chapter_count_row["count"] or 0) if chapter_count_row else 0
     if existing and existing["source_mtime"] == stat.st_mtime and existing["source_size"] == stat.st_size and chapter_count:
+        if not existing["cover_path"]:
+            extracted = read_epub(path)
+            connection.execute(
+                "UPDATE books SET cover_path = ?, updated_at = ? WHERE id = ?",
+                (extracted.cover_path, now_iso(), int(existing["id"])),
+            )
+            connection.commit()
         ensure_cefr_parts(connection, int(existing["id"]))
         return summarize_book_row(connection, int(existing["id"])), "skipped"
 
@@ -115,7 +122,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
         connection.execute(
             """
             UPDATE books
-            SET slug = ?, title = ?, author = ?, source_mtime = ?, source_size = ?, text_status = ?, cefr_status = ?, updated_at = ?
+            SET slug = ?, title = ?, author = ?, source_mtime = ?, source_size = ?, cover_path = ?, text_status = ?, cefr_status = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -124,6 +131,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
                 extracted.author,
                 stat.st_mtime,
                 stat.st_size,
+                extracted.cover_path,
                 "ready",
                 "pending",
                 timestamp,
@@ -149,7 +157,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
                 source_path,
                 stat.st_mtime,
                 stat.st_size,
-                None,
+                extracted.cover_path,
                 "ready",
                 "pending",
                 timestamp,
@@ -265,6 +273,7 @@ def list_books(connection: sqlite3.Connection) -> list[dict[str, object]]:
             b.id,
             b.title,
             b.author,
+            b.cover_path,
             b.cefr_status,
             rp.last_read_at,
             rp.last_paragraph_index,
@@ -922,6 +931,7 @@ def summarize_book_row(connection: sqlite3.Connection, book_id: int) -> dict[str
             b.id,
             b.title,
             b.author,
+            b.cover_path,
             b.cefr_status,
             rp.last_read_at,
             rp.last_paragraph_index,
@@ -959,6 +969,7 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
         "id": int(row["id"]),
         "title": row["title"],
         "author": row["author"],
+        "cover_url": build_cover_url(int(row["id"]), row["cover_path"]),
         "has_cefr": ready_parts > 0,
         "cefr_status": row["cefr_status"],
         "cefr_ready_parts": ready_parts,
@@ -967,3 +978,9 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
         "progress_label": f"Paragraph {min(current_paragraph + 1, total_paragraphs)} of {total_paragraphs}",
         "last_read_at": row["last_read_at"],
     }
+
+
+def build_cover_url(book_id: int, cover_path: str | None) -> str | None:
+    if not cover_path:
+        return None
+    return f"/api/books/{book_id}/cover/{quote(cover_path, safe='')}"

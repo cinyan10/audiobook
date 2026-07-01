@@ -4,6 +4,7 @@ type BookSummary = {
   id: number;
   title: string;
   author: string;
+  cover_url: string | null;
   has_cefr: boolean;
   cefr_status: string;
   cefr_ready_parts: number;
@@ -92,23 +93,6 @@ type CEFRCheckSummary = {
   paragraphs: ParagraphRecord[];
 };
 
-type ScanSummary = {
-  imported: number;
-  updated: number;
-  skipped: number;
-  books: BookSummary[];
-};
-
-type CEFRJobSummary = {
-  id: number | null;
-  status: string;
-  total_parts: number;
-  completed_parts: number;
-  ready_parts: number;
-  current_label: string | null;
-  error_message: string | null;
-};
-
 type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
 
 const LEVEL_LABELS = ["A1", "A2", "B1", "B2", "C1"] as const;
@@ -140,91 +124,37 @@ function App() {
 
 function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
   const [books, setBooks] = useState<BookSummary[]>([]);
-  const [job, setJob] = useState<CEFRJobSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<"scan" | "upload" | "initialize" | null>(null);
-  const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const loadBooks = async () => {
+  const loadBooks = async ({ refresh = false }: { refresh?: boolean } = {}) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/books");
+      const response = await fetch(refresh ? "/api/books/scan" : "/api/books", {
+        method: refresh ? "POST" : "GET",
+      });
       if (!response.ok) {
         throw new Error(`Failed to load books (${response.status})`);
       }
-      setBooks((await response.json()) as BookSummary[]);
+      const payload = (await response.json()) as BookSummary[] | { books: BookSummary[] };
+      setBooks(Array.isArray(payload) ? payload : payload.books);
     } catch (loadError) {
+      if (refresh) {
+        await loadBooks();
+        return;
+      }
       setError(loadError instanceof Error ? loadError.message : "Failed to load books.");
     } finally {
       setLoading(false);
     }
   };
 
-  const loadJob = async () => {
-    try {
-      const response = await fetch("/api/cefr/initialize");
-      if (!response.ok) {
-        throw new Error(`Failed to load initialize status (${response.status})`);
-      }
-      setJob((await response.json()) as CEFRJobSummary);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load initialize status.");
-    }
-  };
-
   useEffect(() => {
-    void loadBooks();
-    void loadJob();
+    void loadBooks({ refresh: true });
   }, []);
-
-  useEffect(() => {
-    if (job?.status !== "running") {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      void loadJob();
-      void loadBooks();
-    }, 1500);
-    return () => window.clearInterval(interval);
-  }, [job?.status]);
-
-  const handleScan = async () => {
-    setBusyAction("scan");
-    setError(null);
-    try {
-      const response = await fetch("/api/books/scan", { method: "POST" });
-      if (!response.ok) {
-        throw new Error(`Scan failed (${response.status})`);
-      }
-      const summary = (await response.json()) as ScanSummary;
-      setLastScan(summary);
-      setBooks(summary.books);
-      await loadJob();
-    } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Scan failed.");
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const handleInitialize = async () => {
-    setBusyAction("initialize");
-    setError(null);
-    try {
-      const response = await fetch("/api/cefr/initialize", { method: "POST" });
-      if (!response.ok) {
-        throw new Error(`Initialize failed (${response.status})`);
-      }
-      setJob((await response.json()) as CEFRJobSummary);
-      await loadBooks();
-    } catch (initializeError) {
-      setError(initializeError instanceof Error ? initializeError.message : "Initialize failed.");
-    } finally {
-      setBusyAction(null);
-    }
-  };
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -234,7 +164,7 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
 
     const formData = new FormData();
     formData.append("file", file);
-    setBusyAction("upload");
+    setUploading(true);
     setError(null);
     try {
       const response = await fetch("/api/books/upload", { method: "POST", body: formData });
@@ -242,113 +172,68 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
         throw new Error(`Upload failed (${response.status})`);
       }
       await response.json();
-      await loadBooks();
-      await loadJob();
+      await loadBooks({ refresh: true });
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed.");
     } finally {
-      setBusyAction(null);
+      setUploading(false);
       event.target.value = "";
     }
   };
 
-  const ringTotal = job?.total_parts ?? 0;
-  const ringReady = job?.ready_parts ?? 0;
-  const ringPercent = ringTotal ? (ringReady / ringTotal) * 100 : 0;
-
   return (
-    <main className="page">
-      <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">Phase 1 Reader</p>
-          <h1>Read first, paint CEFR later.</h1>
-          <p className="lede">
-            The reader opens with plain text immediately, then fills in Oxford CEFR by the current
-            section or with a full-library initialize pass.
-          </p>
-        </div>
-        <div className="hero-panel">
-          <div className="hero-actions">
-            <button className="primary-button" onClick={() => void handleScan()} disabled={busyAction !== null}>
-              {busyAction === "scan" ? "Refreshing..." : "Refresh Library"}
-            </button>
-            <label className="upload-button">
-              <input type="file" accept=".epub,application/epub+zip" onChange={handleUpload} disabled={busyAction !== null} />
-              {busyAction === "upload" ? "Uploading..." : "Upload EPUB"}
-            </label>
-          </div>
-          <div className="initialize-card">
-            <ProgressRing percent={ringPercent} label={`${ringReady}/${ringTotal || 0}`} />
-            <div className="initialize-copy">
-              <strong>Initialize CEFR</strong>
-              <span>{job?.current_label || "Batch process the full library in the background."}</span>
-              <span>{renderJobStatus(job)}</span>
-            </div>
-            <button
-              className="secondary-button"
-              onClick={() => void handleInitialize()}
-              disabled={busyAction !== null || job?.status === "running"}
-            >
-              {job?.status === "running" ? "Initializing..." : "Initialize"}
-            </button>
-          </div>
-          <div className="status-card">
-            <span>{books.length} books indexed</span>
-            <span>{books.reduce((sum, book) => sum + book.cefr_ready_parts, 0)} ready parts</span>
-            <span>{books.reduce((sum, book) => sum + book.cefr_total_parts, 0)} total parts</span>
-          </div>
-          {lastScan ? (
-            <p className="scan-note">
-              Last refresh: {lastScan.imported} imported, {lastScan.updated} updated, {lastScan.skipped} unchanged.
-            </p>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="legend-strip" aria-label="CEFR legend">
-        {LEVEL_LABELS.map((level) => (
-          <span key={level} className={`legend-pill level-${level.toLowerCase()}`}>
-            {level}
-          </span>
-        ))}
-      </section>
-
+    <main className="page library-page">
+      <input
+        ref={fileInputRef}
+        className="visually-hidden"
+        type="file"
+        accept=".epub,application/epub+zip"
+        onChange={handleUpload}
+        disabled={uploading}
+      />
       {error ? <p className="error-banner">{error}</p> : null}
-
-      <section className="library-section">
-        <div className="section-header">
-          <h2>Recent books</h2>
-          <span>{loading ? "Loading..." : `${books.length} ready to read`}</span>
-        </div>
-        <div className="book-grid">
-          {books.map((book) => (
-            <article key={book.id} className="book-card">
-              <div className="book-meta">
-                <p className="book-author">{book.author || "Unknown author"}</p>
-                <button className="book-link" onClick={() => onOpenBook(book.id)}>
-                  {book.title}
-                </button>
-              </div>
-              <p className="progress-label">{book.progress_label}</p>
-              <div className="progress-bar" aria-hidden="true">
-                <span style={{ width: `${Math.max(book.progress_percent, 4)}%` }} />
-              </div>
-              <div className="card-footer">
-                <span className={`cefr-badge ${book.has_cefr ? "ready" : "missing"}`}>
-                  {book.cefr_ready_parts}/{book.cefr_total_parts || 0} CEFR parts
-                </span>
-                <span>{formatTimestamp(book.last_read_at)}</span>
-              </div>
-            </article>
-          ))}
-          {!loading && books.length === 0 ? (
-            <article className="empty-state">
-              <h3>No books yet</h3>
-              <p>Drop an EPUB into the local books folder or upload one here, then refresh the library.</p>
-            </article>
-          ) : null}
-        </div>
+      <section className="library-grid" aria-label="Library">
+        {books.map((book, index) => (
+          <button
+            key={book.id}
+            className={`library-book ${coverToneClass(index)}`}
+            onClick={() => onOpenBook(book.id)}
+            type="button"
+          >
+            <div className="library-cover">
+              {book.cover_url ? (
+                <img src={book.cover_url} alt={book.title} className="library-cover-image" />
+              ) : (
+                <div className="library-cover-placeholder">
+                  <p>{book.title}</p>
+                  <span>{book.author || "Unknown author"}</span>
+                </div>
+              )}
+            </div>
+            <div className="library-book-meta">
+              <span className={`library-badge ${book.last_read_at ? "progress" : "new"}`}>
+                {book.last_read_at ? `${Math.round(book.progress_percent)}%` : "NEW"}
+              </span>
+              <span className="library-book-menu" aria-hidden="true">
+                •••
+              </span>
+            </div>
+          </button>
+        ))}
+        <button
+          className={`library-book library-book-add ${uploading ? "is-uploading" : ""}`}
+          onClick={() => fileInputRef.current?.click()}
+          type="button"
+        >
+          <div className="library-cover library-cover-add" aria-hidden="true">
+            <span>+</span>
+          </div>
+          <div className="library-book-meta">
+            <span className="library-badge add">{uploading ? "ADDING" : "ADD"}</span>
+          </div>
+        </button>
       </section>
+      {!loading && books.length === 0 ? <p className="library-empty">Add your first EPUB to start the shelf.</p> : null}
     </main>
   );
 }
@@ -918,20 +803,9 @@ function writeCachedParagraphs(cacheKey: string, paragraphs: ParagraphRecord[]) 
   }
 }
 
-function renderJobStatus(job: CEFRJobSummary | null): string {
-  if (!job) {
-    return "Ready when you want it.";
-  }
-  if (job.status === "running") {
-    return `${job.completed_parts}/${job.total_parts} queued parts processed`;
-  }
-  if (job.status === "complete") {
-    return "Initialize complete.";
-  }
-  if (job.status === "error" && job.error_message) {
-    return job.error_message;
-  }
-  return "Ready when you want it.";
+function coverToneClass(index: number): string {
+  const tones = ["tone-sage", "tone-graphite", "tone-umber", "tone-plum"];
+  return tones[index % tones.length];
 }
 
 function findChapterIndex(chapters: ChapterRecord[], paragraphIndex: number): number {
