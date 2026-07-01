@@ -380,6 +380,9 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       ? filterBlocksForPart(currentBlocks, currentChapter.parts[selectedPartIndex])
       : currentBlocks;
   const currentParagraphs = visibleBlocks.flatMap((block) => (block.kind === "paragraph" ? [block.paragraph] : []));
+  const currentChapterWordCounts = currentChapter && chapterCache[selectedChapterIndex] ? countWordsByPart(currentBlocks, currentChapter.parts) : null;
+  const currentPartWordCount =
+    currentChapterWordCounts && selectedPartIndex !== null ? currentChapterWordCounts[selectedPartIndex] ?? 0 : null;
   const isImageOnlyView = visibleBlocks.length > 0 && visibleBlocks.every((block) => block.kind === "image");
   const scrollTargetKey = `${selectedChapterIndex}:${selectedPartIndex ?? "all"}`;
 
@@ -665,10 +668,6 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       {!loading && book ? (
         <div className="reader-frame">
           <aside className="chapter-sidebar">
-            <div className="chapter-sidebar-header">
-              <strong>On this book</strong>
-              <span>{book.chapters.length} sections</span>
-            </div>
             <nav className="chapter-list" aria-label="Book chapters">
               {book.chapters.map((chapter) => (
                 <div key={chapter.chapter_index} className="chapter-item">
@@ -717,12 +716,12 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                 <span className="legend-pill neutral">
                   {book.cefr.ready_parts}/{book.cefr.total_parts || 0} CEFR parts ready
                 </span>
+                {currentPartWordCount !== null ? <span className="legend-pill neutral">{currentPartWordCount} words</span> : null}
                 {loadingChapter ? <span className="legend-pill neutral">Loading chapter...</span> : null}
                 {loadingPartIndex !== null ? <span className="legend-pill neutral">Loading current section...</span> : null}
               </div>
 
               <div className={`chapter-heading ${isImageOnlyView ? "chapter-heading-image-only" : ""}`}>
-                <p className="eyebrow">Current chapter</p>
                 <h2>{currentChapter?.title || "Loading..."}</h2>
                 {selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex] ? (
                   <p className="chapter-part-label">{currentChapter.parts[selectedPartIndex].title}</p>
@@ -872,6 +871,30 @@ function filterBlocksForPart(blocks: ChapterBlock[], part: ChapterPartRecord): C
     pendingImages.length = 0;
   }
   return visible;
+}
+
+function countWordsByPart(blocks: ChapterBlock[], parts: ChapterPartRecord[]): Record<number, number> {
+  const counts = Object.fromEntries(parts.map((part) => [part.part_index, 0]));
+  for (const block of blocks) {
+    if (block.kind !== "paragraph") {
+      continue;
+    }
+    const part = parts.find(
+      (item) =>
+        block.paragraph.paragraph_index >= item.start_paragraph_index &&
+        block.paragraph.paragraph_index <= item.end_paragraph_index,
+    );
+    if (!part) {
+      continue;
+    }
+    counts[part.part_index] += countWords(block.paragraph.text);
+  }
+  return counts;
+}
+
+function countWords(text: string): number {
+  const trimmed = text.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
 }
 
 function findAdjacentPart(
