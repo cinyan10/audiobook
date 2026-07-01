@@ -582,14 +582,14 @@ code {
 
 .image-dialog {
   position: relative;
-  width: min(92vw, 960px);
+  width: fit-content;
+  max-width: calc(100vw - 3rem);
   max-height: calc(100vh - 3rem);
   margin: 0;
-  padding: 3.5rem 1rem 1rem;
+  padding: 0;
   border: 0;
-  border-radius: 24px;
-  background: rgba(255, 250, 244, 0.96);
-  box-shadow: 0 32px 80px rgba(32, 23, 17, 0.28);
+  background: transparent;
+  box-shadow: none;
 }
 
 .image-dialog::backdrop {
@@ -598,21 +598,25 @@ code {
 
 .image-dialog-close {
   position: absolute;
-  top: 0.85rem;
-  right: 0.85rem;
-  min-height: 2.5rem;
-  padding: 0 0.9rem;
-  border-radius: 999px;
-  background: rgba(36, 27, 21, 0.08);
-  color: #3c3028;
+  top: 0.55rem;
+  right: 0.65rem;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  background: transparent;
+  color: #fbf4eb;
+  font-size: 2rem;
+  line-height: 1;
+  text-shadow: 0 2px 10px rgba(32, 23, 17, 0.55);
 }
 
 .image-dialog-image {
   display: block;
   width: auto;
   max-width: 100%;
-  max-height: calc(100vh - 7rem);
+  max-height: calc(100vh - 3rem);
   margin: 0 auto;
+  background: #fbf4eb;
   border-radius: 0;
 }
 

@@ -369,6 +369,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   const paragraphRefs = useRef<Array<HTMLElement | null>>([]);
   const saveTimeoutRef = useRef<number | null>(null);
   const lastSavedRef = useRef<number>(-1);
+  const lastScrollTargetRef = useRef<string>("");
   const requestedPartsRef = useRef<Set<number>>(new Set());
   const shouldRestoreScrollRef = useRef<boolean>(false);
 
@@ -380,6 +381,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       : currentBlocks;
   const currentParagraphs = visibleBlocks.flatMap((block) => (block.kind === "paragraph" ? [block.paragraph] : []));
   const isImageOnlyView = visibleBlocks.length > 0 && visibleBlocks.every((block) => block.kind === "image");
+  const scrollTargetKey = `${selectedChapterIndex}:${selectedPartIndex ?? "all"}`;
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
@@ -512,11 +514,19 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     if (!book || !currentChapter) {
       return;
     }
+    if (lastScrollTargetRef.current === scrollTargetKey) {
+      return;
+    }
     if (!currentParagraphs.length) {
+      if (!currentBlocks.length) {
+        return;
+      }
       window.scrollTo({ top: 0, behavior: "auto" });
+      lastScrollTargetRef.current = scrollTargetKey;
       shouldRestoreScrollRef.current = false;
       return;
     }
+    lastScrollTargetRef.current = scrollTargetKey;
     if (shouldRestoreScrollRef.current) {
       const targetIndex = currentParagraphs.findIndex(
         (paragraph) => paragraph.paragraph_index === book.progress.last_paragraph_index,
@@ -532,7 +542,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
       window.scrollTo({ top: 0, behavior: "auto" });
     }
     void ensurePartLoaded(book, currentChapter.start_paragraph_index);
-  }, [book, currentChapter, currentParagraphs]);
+  }, [book, currentChapter, currentParagraphs, scrollTargetKey]);
 
   useEffect(() => {
     if (!book || !currentParagraphs.length) {
@@ -719,7 +729,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
         <div className="image-dialog-backdrop" onClick={() => setDialogImage(null)} role="presentation">
           <dialog className="image-dialog" open onClick={(event) => event.stopPropagation()}>
             <button className="image-dialog-close" onClick={() => setDialogImage(null)} aria-label="Close image view">
-              Close
+              ×
             </button>
             <img className="image-dialog-image" src={dialogImage.src} alt={dialogImage.alt || currentChapter?.title || ""} />
           </dialog>
