@@ -23,6 +23,23 @@ type TokenRecord = {
   oxford_tip: string | null;
 };
 
+type TimedTokenRecord = {
+  token_index: number;
+  paragraph_index: number;
+  text: string;
+  start_time: number;
+  end_time: number;
+};
+
+type AlignmentPayload = {
+  book_id: number;
+  chapter_index: number;
+  part_index: number;
+  audio_path: string;
+  duration_seconds: number;
+  tokens: TimedTokenRecord[];
+};
+
 type ParagraphRecord = {
   paragraph_index: number;
   text: string;
@@ -57,6 +74,7 @@ type ChapterPartRecord = {
   start_paragraph_index: number;
   end_paragraph_index: number;
   audio_available: boolean;
+  alignment_available: boolean;
 };
 
 type ChapterRecord = {
@@ -502,15 +520,20 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [loadingCefr, setLoadingCefr] = useState(false);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
+  const [alignmentTokens, setAlignmentTokens] = useState<TimedTokenRecord[]>([]);
+  const [activeTokenIndex, setActiveTokenIndex] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const chapterParagraphsRef = useRef<ParagraphRecord[]>([]);
   const paragraphRefs = useRef<Array<HTMLElement | null>>([]);
+  const tokenRefs = useRef<Record<number, HTMLElement | null>>({});
   const saveTimeoutRef = useRef<number | null>(null);
   const audioSaveIntervalRef = useRef<number | null>(null);
   const lastSavedRef = useRef<number>(-1);
   const lastAudioSaveKeyRef = useRef<string>("");
   const lastLoadedAudioKeyRef = useRef<string>("");
   const lastScrollTargetRef = useRef<string>("");
+  const lastAutoScrollTokenRef = useRef<number | null>(null);
+  const suppressScrollProgressUntilRef = useRef<number>(0);
   const requestedCefrRef = useRef<Set<string>>(new Set());
   const completedCefrRef = useRef<Set<string>>(new Set());
   const activeCefrKeyRef = useRef<string>("");
@@ -539,11 +562,19 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   const isImageOnlyView = visibleBlocks.length > 0 && visibleBlocks.every((block) => block.kind === "image");
   const scrollTargetKey = `${selectedChapterIndex}:${selectedPartIndex ?? "all"}`;
   const currentAudioSrc = book && currentPart?.audio_available ? `/api/books/${book.id}/audio/${selectedChapterIndex}/${currentPart.part_index}` : null;
+  const currentAlignmentSrc =
+    book && currentPart?.audio_available && currentPart.alignment_available
+      ? `/api/books/${book.id}/alignment/${selectedChapterIndex}/${currentPart.part_index}`
+      : null;
   const currentAudioKey = book && currentPart ? `${book.id}:${selectedChapterIndex}:${currentPart.part_index}` : "";
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
   }, [currentParagraphs]);
+
+  useEffect(() => {
+    tokenRefs.current = {};
+  }, [scrollTargetKey]);
 
   useEffect(() => {
     audioContextRef.current =
@@ -786,6 +817,63 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
     };
   }, [audioState.playing, currentAudioSrc]);
 
+  useEffect(() => {
+    let active = true;
+    setAlignmentTokens([]);
+    setActiveTokenIndex(null);
+    lastAutoScrollTokenRef.current = null;
+    if (!currentAlignmentSrc) {
+      return;
+    }
+    const loadAlignment = async () => {
+      try {
+        const response = await fetch(currentAlignmentSrc);
+        if (!active || response.status === 404) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load alignment (${response.status})`);
+        }
+        const payload = (await response.json()) as AlignmentPayload;
+        if (active) {
+          setAlignmentTokens(payload.tokens);
+        }
+      } catch (loadError) {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load alignment.");
+        }
+      }
+    };
+    void loadAlignment();
+    return () => {
+      active = false;
+    };
+  }, [currentAlignmentSrc]);
+
+  useEffect(() => {
+    if (!alignmentTokens.length) {
+      setActiveTokenIndex(null);
+      return;
+    }
+    const activeToken = alignmentTokens.find(
+      (token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time,
+    );
+    setActiveTokenIndex((current) => (current === (activeToken?.token_index ?? null) ? current : activeToken?.token_index ?? null));
+    if (!activeToken || lastAutoScrollTokenRef.current === activeToken.token_index) {
+      return;
+    }
+    const element = tokenRefs.current[activeToken.token_index];
+    if (!element) {
+      return;
+    }
+    const bounds = element.getBoundingClientRect();
+    if (bounds.bottom > window.innerHeight - 160) {
+      lastAutoScrollTokenRef.current = activeToken.token_index;
+      suppressScrollProgressUntilRef.current = Date.now() + 10000;
+      window.scrollBy({ top: window.innerHeight * 0.7, behavior: "smooth" });
+    }
+  }, [alignmentTokens, audioState.currentTime]);
+
   useEffect(
     () => () => {
       void persistAudioProgress(true);
@@ -924,6 +1012,13 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
     }
 
     const detectParagraph = () => {
+      const audio = audioRef.current;
+      if (currentAlignmentSrc && activeTokenIndex !== null && audio && audio.currentTime > 0) {
+        return;
+      }
+      if (Date.now() < suppressScrollProgressUntilRef.current) {
+        return;
+      }
       const firstVisible = paragraphRefs.current.findIndex((paragraph) => {
         if (!paragraph) {
           return false;
@@ -967,7 +1062,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
         window.clearTimeout(saveTimeoutRef.current);
       }
     };
-  }, [book, currentParagraphs]);
+  }, [activeTokenIndex, book, currentAlignmentSrc, currentParagraphs]);
 
   useEffect(() => {
     if (!book || dialogImage) {
@@ -1186,7 +1281,10 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
                     {block.paragraph.tokens.map((token) => (
                       <span
                         key={token.token_index}
-                        className={token.cefr_level ? `reader-token level-${token.cefr_level.toLowerCase()}` : "reader-token"}
+                        ref={(node) => {
+                          tokenRefs.current[token.token_index] = node;
+                        }}
+                        className={readerTokenClassName(token, token.token_index === activeTokenIndex)}
                         title={token.oxford_tip || ""}
                       >
                         {token.text}
@@ -1309,6 +1407,16 @@ function countWordsByPart(blocks: ChapterBlock[], parts: ChapterPartRecord[]): R
 function countWords(text: string): number {
   const trimmed = text.trim();
   return trimmed ? trimmed.split(/\s+/).length : 0;
+}
+
+function readerTokenClassName(token: TokenRecord, active: boolean): string {
+  return [
+    "reader-token",
+    token.cefr_level ? `level-${token.cefr_level.toLowerCase()}` : "",
+    active ? "reader-token-active" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function findAdjacentPart(

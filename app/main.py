@@ -30,8 +30,8 @@ except ModuleNotFoundError:
 
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
-from app.schemas import BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
+from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
+from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
 BOOKS_DIR = Path("books")
@@ -206,6 +206,19 @@ def get_book_part_audio(
     if path is None:
         raise HTTPException(status_code=404, detail="Audio not found.")
     return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+
+@app.get("/api/books/{book_id}/alignment/{chapter_index}/{part_index}", response_model=AlignmentPayload)
+def get_book_part_alignment(
+    book_id: Annotated[int, PathParam(ge=1)],
+    chapter_index: Annotated[int, PathParam(ge=0)],
+    part_index: Annotated[int, PathParam(ge=0)],
+) -> dict[str, object]:
+    with get_connection() as connection:
+        payload = get_book_part_alignment_payload(connection, book_id, chapter_index, part_index)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Alignment not found.")
+    return payload
 
 
 @app.post("/api/books/{book_id}/cefr-parts/{part_index}/load", response_model=CEFRPartLoadSummary)

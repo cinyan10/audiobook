@@ -843,8 +843,19 @@ code {
   background: transparent;
 }
 
+.reader-token-active {
+  background: #f3c756;
+  color: #21170f;
+  border-radius: 0.18em;
+  box-shadow: 0 0 0 0.12em rgba(243, 199, 86, 0.42);
+}
+
 .reader-token:hover {
   background: transparent;
+}
+
+.reader-token-active:hover {
+  background: #f3c756;
 }
 
 .chapter-heading-image-only {

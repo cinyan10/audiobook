@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from unittest.mock import patch
 from pathlib import Path
 from zipfile import ZipFile
 
 from app.db import connect, init_db
+from app.alignment import map_transcript_to_tokens
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
+from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -325,6 +327,23 @@ class Phase1ImportTests(unittest.TestCase):
             audio_path = root / "audio" / "test-book" / "chapter-01-part-002.wav"
             audio_path.parent.mkdir(parents=True)
             audio_path.write_bytes(b"fake wav")
+            alignment_path = root / "audio" / "test-book" / "chapter-01-part-002.alignment.json"
+            alignment_payload = {
+                "book_id": 1,
+                "chapter_index": 0,
+                "part_index": 1,
+                "audio_path": str(audio_path),
+                "duration_seconds": 1.0,
+                "tokens": [
+                    {
+                        "token_index": 0,
+                        "paragraph_index": 2,
+                        "text": "Second",
+                        "start_time": 0.0,
+                        "end_time": 0.4,
+                    }
+                ],
+            }
 
             db_path = root / "reader.sqlite3"
             init_db(db_path)
@@ -364,6 +383,8 @@ class Phase1ImportTests(unittest.TestCase):
                 (book_id,),
             )
             connection.commit()
+            alignment_payload["book_id"] = book_id
+            alignment_path.write_text(json.dumps(alignment_payload), encoding="utf-8")
 
             with patch("app.library.AUDIO_DIR", root / "audio"):
                 reader = get_reader_payload(connection, book_id)
@@ -372,8 +393,14 @@ class Phase1ImportTests(unittest.TestCase):
                     [part["audio_available"] for part in reader["chapters"][0]["parts"]],
                     [False, True],
                 )
+                self.assertEqual(
+                    [part["alignment_available"] for part in reader["chapters"][0]["parts"]],
+                    [False, True],
+                )
                 self.assertIsNone(get_book_part_audio_path(connection, book_id, 0, 0))
                 self.assertEqual(get_book_part_audio_path(connection, book_id, 0, 1), audio_path)
+                self.assertEqual(part_alignment_path("test-book", 1, 1), alignment_path)
+                self.assertEqual(get_book_part_alignment_payload(connection, book_id, 0, 1), alignment_payload)
 
                 progress = save_progress(
                     connection,
@@ -389,6 +416,25 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(progress["last_audio_part_index"], 1)
             self.assertAlmostEqual(progress["last_audio_time_seconds"], 12.5)
             connection.close()
+
+    def test_transcript_words_are_mapped_to_reader_tokens(self) -> None:
+        mapped = map_transcript_to_tokens(
+            [
+                {"token_index": 10, "paragraph_index": 2, "text": "Hello", "normalized_text": "hello"},
+                {"token_index": 12, "paragraph_index": 2, "text": "world", "normalized_text": "world"},
+            ],
+            [
+                {"normalized_text": "hello", "start_time": 0.1, "end_time": 0.4},
+                {"normalized_text": "world", "start_time": 0.45, "end_time": 0.8},
+            ],
+        )
+        self.assertEqual(
+            mapped,
+            [
+                {"token_index": 10, "paragraph_index": 2, "text": "Hello", "start_time": 0.1, "end_time": 0.4},
+                {"token_index": 12, "paragraph_index": 2, "text": "world", "start_time": 0.45, "end_time": 0.8},
+            ],
+        )
 
     def test_redundant_title_with_leading_dashes_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

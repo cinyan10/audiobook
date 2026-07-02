@@ -44,6 +44,23 @@ class TokenRecord(BaseModel):
     oxford_tip: str | None = None
 
 
+class TimedTokenRecord(BaseModel):
+    token_index: int
+    paragraph_index: int
+    text: str
+    start_time: float
+    end_time: float
+
+
+class AlignmentPayload(BaseModel):
+    book_id: int
+    chapter_index: int
+    part_index: int
+    audio_path: str
+    duration_seconds: float
+    tokens: list[TimedTokenRecord]
+
+
 class ParagraphRecord(BaseModel):
     paragraph_index: int
     text: str
@@ -74,6 +91,7 @@ class ChapterPartRecord(BaseModel):
     start_paragraph_index: int
     end_paragraph_index: int
     audio_available: bool = False
+    alignment_available: bool = False
 
 
 class ChapterRecord(BaseModel):

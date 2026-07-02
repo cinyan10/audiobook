@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -30,8 +31,16 @@ def part_audio_path(book_slug: str, chapter_number: int, part_index: int) -> Pat
     return AUDIO_DIR / book_slug / f"{audio_part_stem(chapter_number, part_index)}.wav"
 
 
+def part_alignment_path(book_slug: str, chapter_number: int, part_index: int) -> Path:
+    return AUDIO_DIR / book_slug / f"{audio_part_stem(chapter_number, part_index)}.alignment.json"
+
+
 def part_audio_exists(book_slug: str, chapter_number: int, part_index: int) -> bool:
     return part_audio_path(book_slug, chapter_number, part_index).exists()
+
+
+def part_alignment_exists(book_slug: str, chapter_number: int, part_index: int) -> bool:
+    return part_alignment_path(book_slug, chapter_number, part_index).exists()
 
 
 def now_iso() -> str:
@@ -398,6 +407,11 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
                             chapter_audio_number(str(chapter["title"]), int(chapter["chapter_index"])),
                             int(part["part_index"]),
                         ),
+                        "alignment_available": part_alignment_exists(
+                            str(book["slug"]),
+                            chapter_audio_number(str(chapter["title"]), int(chapter["chapter_index"])),
+                            int(part["part_index"]),
+                        ),
                     }
                     for part in chapter["parts"]
                 ],
@@ -679,6 +693,42 @@ def get_book_part_audio_path(
         part_index,
     )
     return path if path.exists() else None
+
+
+def get_book_part_alignment_payload(
+    connection: sqlite3.Connection,
+    book_id: int,
+    chapter_index: int,
+    part_index: int,
+) -> dict[str, object] | None:
+    payload = get_reader_payload(connection, book_id)
+    if payload is None:
+        return None
+    chapter = next((item for item in payload["chapters"] if int(item["chapter_index"]) == chapter_index), None)
+    if chapter is None:
+        return None
+    part = next((item for item in chapter["parts"] if int(item["part_index"]) == part_index), None)
+    if part is None or not part.get("alignment_available"):
+        return None
+    book = connection.execute("SELECT slug FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        return None
+    path = part_alignment_path(
+        str(book["slug"]),
+        chapter_audio_number(str(chapter["title"]), chapter_index),
+        part_index,
+    )
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as file:
+        alignment = json.load(file)
+    if (
+        int(alignment.get("book_id", -1)) != book_id
+        or int(alignment.get("chapter_index", -1)) != chapter_index
+        or int(alignment.get("part_index", -1)) != part_index
+    ):
+        return None
+    return alignment
 
 
 def build_raw_chapter_blocks(
