@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parent
@@ -62,6 +63,78 @@ def prod_server_command(host: str, api_port: int) -> tuple[list[str], Path]:
     return [preferred_python(), "-m", "uvicorn", "app.main:app", "--host", host, "--port", str(api_port)], ROOT
 
 
+def port_processes(port: int) -> list[tuple[int, str]]:
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpct"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+    if result.returncode not in (0, 1):
+        return []
+    processes: list[tuple[int, str]] = []
+    pid: int | None = None
+    command = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("c"):
+            command = line[1:]
+        elif line.startswith("t") and line[1:] == "LISTEN" and pid is not None:
+            processes.append((pid, command or "unknown"))
+            pid = None
+            command = ""
+    return processes
+
+
+def confirm(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() in {"y", "yes"}
+    except EOFError:
+        return False
+
+
+def kill_processes(processes: Iterable[tuple[int, str]], port: int) -> bool:
+    process_list = list(processes)
+    if not process_list:
+        return True
+    summary = ", ".join(f"{command} ({pid})" for pid, command in process_list)
+    if not confirm(f"Port {port} is in use by {summary}. Kill it and continue? [y/N] "):
+        print(f"Leaving port {port} alone.")
+        return False
+    for pid, _command in process_list:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    deadline = time.time() + 5
+    pending = [pid for pid, _command in process_list]
+    while pending and time.time() < deadline:
+        still_running: list[int] = []
+        for pid in pending:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            still_running.append(pid)
+        pending = still_running
+        if pending:
+            time.sleep(0.1)
+    for pid in pending:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return True
+
+
+def ensure_port_available(port: int) -> bool:
+    return kill_processes(port_processes(port), port)
+
+
 def run_command(command: list[str], cwd: Path, dry_run: bool) -> int:
     print(f"$ {' '.join(command)}")
     if dry_run:
@@ -78,6 +151,9 @@ def run_dev(host: str, api_port: int, frontend_port: int, dry_run: bool) -> int:
         for command, _cwd in commands:
             print(f"$ {' '.join(command)}")
         return 0
+    for port in (api_port, frontend_port):
+        if not ensure_port_available(port):
+            return 1
 
     processes: list[subprocess.Popen[bytes]] = []
     try:
@@ -113,6 +189,8 @@ def stop_processes(processes: list[subprocess.Popen[bytes]]) -> None:
 
 
 def run_prod(host: str, api_port: int, dry_run: bool) -> int:
+    if not dry_run and not ensure_port_available(api_port):
+        return 1
     build_command, build_cwd = prod_build_command()
     build_code = run_command(build_command, build_cwd, dry_run)
     if build_code:
