@@ -26,8 +26,11 @@ textarea {
 }
 
 button {
+  appearance: none;
+  -webkit-appearance: none;
   border: 0;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 code {
@@ -71,6 +74,10 @@ code {
   padding: 2rem 0 4rem;
 }
 
+.reader-shell {
+  padding-top: 1rem;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -93,7 +100,6 @@ code {
 
 .hero-copy,
 .hero-panel,
-.reader-header,
 .reader-paper,
 .book-card,
 .empty-state {
@@ -101,6 +107,17 @@ code {
   border: 1px solid rgba(82, 57, 35, 0.08);
   box-shadow: 0 24px 60px rgba(82, 57, 35, 0.1);
   backdrop-filter: blur(10px);
+}
+
+.reader-navbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  width: 100%;
+  background: rgba(243, 234, 220, 0.9);
+  border-bottom: 1px solid rgba(82, 57, 35, 0.12);
+  box-shadow: 0 10px 30px rgba(82, 57, 35, 0.08);
+  backdrop-filter: blur(14px);
 }
 
 .hero-copy,
@@ -115,8 +132,22 @@ code {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 1rem;
-  border-radius: 999px;
-  padding: 0.7rem 0.9rem;
+  min-height: 4rem;
+  width: min(1120px, calc(100vw - 2rem));
+  margin: 0 auto;
+  padding: 0.7rem 0;
+}
+
+.reader-header-compact {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.reader-nav-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .eyebrow {
@@ -185,6 +216,7 @@ code {
 .secondary-button,
 .upload-button,
 .back-link,
+.nav-icon-button,
 .book-link {
   transition: transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
 }
@@ -199,6 +231,34 @@ code {
   min-height: 3rem;
   padding: 0 1rem;
   border-radius: 999px;
+}
+
+.back-link {
+  min-height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: #5a4130;
+  justify-content: flex-start;
+}
+
+.nav-icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  border-radius: 0.7rem;
+  background: transparent;
+  color: #5a4130;
+}
+
+.nav-icon-button svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
 }
 
 .primary-button {
@@ -300,6 +360,10 @@ code {
   margin-top: 1rem;
 }
 
+.chapter-sidebar-backdrop {
+  display: none;
+}
+
 .reader-layout {
   width: 100%;
 }
@@ -349,6 +413,38 @@ code {
   box-shadow: none;
   backdrop-filter: none;
   scrollbar-width: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.chapter-sidebar.open:not(.floating) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chapter-sidebar.floating {
+  top: 4.7rem;
+  left: 0.8rem;
+  z-index: 25;
+  width: min(320px, calc(100vw - 1.6rem));
+  max-height: calc(100vh - 5.5rem);
+  padding: 1rem 1.1rem;
+  background: rgba(255, 250, 244, 0.95);
+  border: 1px solid rgba(82, 57, 35, 0.08);
+  border-radius: 22px;
+  box-shadow: 0 24px 60px rgba(82, 57, 35, 0.16);
+  backdrop-filter: blur(12px);
+  transform: translateX(calc(-100% - 1.2rem));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.chapter-sidebar.floating.open {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .chapter-sidebar::-webkit-scrollbar {
@@ -566,11 +662,6 @@ code {
   gap: 0.8rem;
 }
 
-.back-link {
-  background: rgba(127, 94, 64, 0.12);
-  color: #5a4130;
-}
-
 .reader-paper {
   padding: 1.5rem 1.8rem 2.6rem;
 }
@@ -719,10 +810,10 @@ code {
   }
 
   .reader-header {
-    position: static;
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.55rem;
-    padding: 0.55rem;
+    width: min(100vw - 1rem, 1120px);
+    padding: 0.55rem 0;
   }
 
   .reader-progress span {
@@ -731,19 +822,6 @@ code {
 
   .reader-layout {
     width: 100%;
-  }
-
-  .chapter-sidebar {
-    position: static;
-    width: auto;
-    max-height: none;
-    margin: 0 0 1rem;
-    padding: 1rem 1.1rem;
-    background: rgba(255, 250, 244, 0.6);
-    border: 1px solid rgba(82, 57, 35, 0.08);
-    border-radius: 20px;
-    box-shadow: 0 16px 40px rgba(82, 57, 35, 0.08);
-    backdrop-filter: blur(8px);
   }
 
   .chapter-list {
@@ -772,6 +850,16 @@ code {
   .reader-image-contained {
     max-width: min(17rem, 72vw);
     max-height: min(20rem, calc(100vh - 16rem));
+  }
+}
+
+@media (max-width: 1479px) {
+  .chapter-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 24;
+    display: block;
+    background: rgba(36, 27, 21, 0.2);
   }
 }
 

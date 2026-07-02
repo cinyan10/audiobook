@@ -94,13 +94,30 @@ type CEFRCheckSummary = {
 };
 
 type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
+type NavbarState = {
+  title: string | null;
+  progressLabel: string | null;
+  progressPercent: number;
+  showSidebarToggle: boolean;
+  sidebarOpen: boolean;
+  onToggleSidebar: (() => void) | null;
+};
 
 const LEVEL_LABELS = ["A1", "A2", "B1", "B2", "C1"] as const;
 const CEFR_CACHE_PREFIX = "audiobook-cefr:v1";
 const MAX_CEFR_BATCH_WORDS = 5000;
+const SIDEBAR_FLOAT_BREAKPOINT = 1480;
 
 function App() {
   const [view, setView] = useState<ViewState>(readLocation());
+  const [navbar, setNavbar] = useState<NavbarState>({
+    title: null,
+    progressLabel: null,
+    progressPercent: 0,
+    showSidebarToggle: false,
+    sidebarOpen: false,
+    onToggleSidebar: null,
+  });
 
   useEffect(() => {
     migrateHashRoute();
@@ -109,16 +126,96 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  useEffect(() => {
+    if (view.kind === "library") {
+      setNavbar({
+        title: null,
+        progressLabel: null,
+        progressPercent: 0,
+        showSidebarToggle: false,
+        sidebarOpen: false,
+        onToggleSidebar: null,
+      });
+    }
+  }, [view]);
+
   return (
     <div className="shell">
       <div className="ambient ambient-left" />
       <div className="ambient ambient-right" />
+      <GlobalNavbar
+        onHome={() => navigateToLibrary()}
+        title={navbar.title}
+        progressLabel={navbar.progressLabel}
+        progressPercent={navbar.progressPercent}
+        showDetails={view.kind === "reader"}
+        showSidebarToggle={navbar.showSidebarToggle}
+        sidebarOpen={navbar.sidebarOpen}
+        onToggleSidebar={navbar.onToggleSidebar}
+      />
       {view.kind === "library" ? (
         <LibraryPage onOpenBook={(bookId) => navigateToBook(bookId)} />
       ) : (
-        <ReaderPage bookId={view.bookId} onBack={() => navigateToLibrary()} />
+        <ReaderPage bookId={view.bookId} onNavbarChange={setNavbar} />
       )}
     </div>
+  );
+}
+
+function GlobalNavbar({
+  onHome,
+  title,
+  progressLabel,
+  progressPercent,
+  showDetails,
+  showSidebarToggle,
+  sidebarOpen,
+  onToggleSidebar,
+}: {
+  onHome: () => void;
+  title: string | null;
+  progressLabel: string | null;
+  progressPercent: number;
+  showDetails: boolean;
+  showSidebarToggle: boolean;
+  sidebarOpen: boolean;
+  onToggleSidebar: (() => void) | null;
+}) {
+  return (
+    <nav className="reader-navbar" aria-label="Reader navigation">
+      <div className={`reader-header ${showDetails ? "" : "reader-header-compact"}`.trim()}>
+        <div className="reader-nav-start">
+          {showSidebarToggle ? (
+            <button
+              className="nav-icon-button"
+              onClick={onToggleSidebar ?? undefined}
+              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              aria-pressed={sidebarOpen}
+              type="button"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3.5" y="5" width="17" height="14" rx="2" />
+                <path d="M9 5v14" />
+              </svg>
+            </button>
+          ) : null}
+          <button className="back-link" onClick={onHome}>
+            Home
+          </button>
+        </div>
+        <div className="reader-title-block">
+          {showDetails ? <h1>{title || "Loading..."}</h1> : null}
+        </div>
+        <div className="reader-progress" aria-label={showDetails && progressLabel ? `Reading progress ${progressLabel}` : undefined}>
+          {showDetails ? (
+            <>
+              <ProgressRing percent={progressPercent} label={progressLabel || "0.0%"} />
+              <span>{progressLabel}</span>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </nav>
   );
 }
 
@@ -238,12 +335,14 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
   );
 }
 
-function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) {
+function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange: (state: NavbarState) => void }) {
   const [book, setBook] = useState<ReaderPayload | null>(null);
   const [chapterCache, setChapterCache] = useState<Record<number, ChapterBlock[]>>({});
   const [selectedChapterIndex, setSelectedChapterIndex] = useState<number>(0);
   const [selectedPartIndex, setSelectedPartIndex] = useState<number | null>(null);
   const [dialogImage, setDialogImage] = useState<ImageRecord | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= SIDEBAR_FLOAT_BREAKPOINT);
+  const [isSidebarFloating, setIsSidebarFloating] = useState(() => window.innerWidth < SIDEBAR_FLOAT_BREAKPOINT);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
@@ -258,6 +357,7 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
   const activeCefrKeyRef = useRef<string>("");
   const cefrAbortRef = useRef<AbortController | null>(null);
   const shouldRestoreScrollRef = useRef<boolean>(false);
+  const sidebarFloatingRef = useRef(isSidebarFloating);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
   const currentBlocks = chapterCache[selectedChapterIndex] ?? [];
@@ -288,6 +388,21 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [dialogImage]);
+
+  useEffect(() => {
+    const syncSidebarLayout = () => {
+      const floating = window.innerWidth < SIDEBAR_FLOAT_BREAKPOINT;
+      setIsSidebarFloating(floating);
+      if (sidebarFloatingRef.current !== floating) {
+        setSidebarOpen(!floating);
+        sidebarFloatingRef.current = floating;
+      }
+    };
+
+    syncSidebarLayout();
+    window.addEventListener("resize", syncSidebarLayout);
+    return () => window.removeEventListener("resize", syncSidebarLayout);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -550,6 +665,11 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
         return;
       }
       const key = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && key === "b") {
+        event.preventDefault();
+        setSidebarOpen((current) => !current);
+        return;
+      }
       if (!["w", "a", "s", "d"].includes(key)) {
         return;
       }
@@ -583,26 +703,42 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
 
   const progressLabel = book ? `${book.progress.percent.toFixed(1)}%` : "0.0%";
 
+  useEffect(() => {
+    onNavbarChange({
+      title: loading ? null : book?.title ?? null,
+      progressLabel: loading ? "0.0%" : progressLabel,
+      progressPercent: book?.progress.percent ?? 0,
+      showSidebarToggle: true,
+      sidebarOpen,
+      onToggleSidebar: () => setSidebarOpen((current) => !current),
+    });
+    return () =>
+      onNavbarChange({
+        title: null,
+        progressLabel: null,
+        progressPercent: 0,
+        showSidebarToggle: false,
+        sidebarOpen: false,
+        onToggleSidebar: null,
+      });
+  }, [book, loading, onNavbarChange, progressLabel, sidebarOpen]);
+
   return (
     <main className="reader-shell">
-      <nav className="reader-header" aria-label="Reader navigation">
-        <button className="back-link" onClick={onBack}>
-          Home
-        </button>
-        <div className="reader-title-block">
-          <h1>{loading ? "Loading..." : book?.title}</h1>
-        </div>
-        <div className="reader-progress" aria-label={`Reading progress ${progressLabel}`}>
-          <ProgressRing percent={book?.progress.percent ?? 0} label={progressLabel} />
-          <span>{progressLabel}</span>
-        </div>
-      </nav>
-
       {error ? <p className="error-banner">{error}</p> : null}
 
       {!loading && book ? (
         <div className="reader-frame">
-          <aside className="chapter-sidebar">
+          {isSidebarFloating && sidebarOpen ? (
+            <button
+              className="chapter-sidebar-backdrop"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Close sidebar"
+              type="button"
+            />
+          ) : null}
+
+          <aside className={`chapter-sidebar ${isSidebarFloating ? "floating" : ""} ${sidebarOpen ? "open" : ""}`.trim()}>
             <nav className="chapter-list" aria-label="Book chapters">
               {book.chapters.map((chapter) => (
                 <div key={chapter.chapter_index} className="chapter-item">
@@ -612,6 +748,9 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                       shouldRestoreScrollRef.current = false;
                       setSelectedChapterIndex(chapter.chapter_index);
                       setSelectedPartIndex(chapter.parts.length ? chapter.parts[0].part_index : null);
+                      if (isSidebarFloating) {
+                        setSidebarOpen(false);
+                      }
                     }}
                   >
                     {chapter.title}
@@ -628,6 +767,9 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
                             shouldRestoreScrollRef.current = false;
                             setSelectedChapterIndex(chapter.chapter_index);
                             setSelectedPartIndex(part.part_index);
+                            if (isSidebarFloating) {
+                              setSidebarOpen(false);
+                            }
                           }}
                         >
                           {part.title}
@@ -702,16 +844,16 @@ function ReaderPage({ bookId, onBack }: { bookId: number; onBack: () => void }) 
         </div>
       ) : null}
 
-      {dialogImage ? (
-        <div className="image-dialog-backdrop" onClick={() => setDialogImage(null)} role="presentation">
-          <dialog className="image-dialog" open onClick={(event) => event.stopPropagation()}>
-            <button className="image-dialog-close" onClick={() => setDialogImage(null)} aria-label="Close image view">
-              ×
-            </button>
-            <img className="image-dialog-image" src={dialogImage.src} alt={dialogImage.alt || currentChapter?.title || ""} />
-          </dialog>
-        </div>
-      ) : null}
+        {dialogImage ? (
+          <div className="image-dialog-backdrop" onClick={() => setDialogImage(null)} role="presentation">
+            <dialog className="image-dialog" open onClick={(event) => event.stopPropagation()}>
+              <button className="image-dialog-close" onClick={() => setDialogImage(null)} aria-label="Close image view">
+                ×
+              </button>
+              <img className="image-dialog-image" src={dialogImage.src} alt={dialogImage.alt || currentChapter?.title || ""} />
+            </dialog>
+          </div>
+        ) : null}
     </main>
   );
 }
