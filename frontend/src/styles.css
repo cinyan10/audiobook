@@ -187,6 +187,14 @@ code {
   font: 700 0.82rem/1 "Cascadia Code", "SFMono-Regular", monospace;
 }
 
+.reader-header-end {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
 .reader-progress .progress-ring {
   width: 2.6rem;
   height: 2.6rem;
@@ -301,6 +309,48 @@ code {
 .navbar-action-button:disabled {
   cursor: wait;
   opacity: 0.68;
+}
+
+.reader-audio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: min(28rem, 42vw);
+  padding: 0.45rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(82, 57, 35, 0.1);
+}
+
+.audio-button,
+.audio-skip-button {
+  min-height: 2.2rem;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  background: rgba(47, 68, 56, 0.12);
+  color: #2f4438;
+  font: 700 0.74rem/1 "Cascadia Code", "SFMono-Regular", monospace;
+}
+
+.audio-button {
+  background: #2f4438;
+  color: #fbf4eb;
+}
+
+.audio-timeline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  font: 700 0.72rem/1 "Cascadia Code", "SFMono-Regular", monospace;
+  color: #5a4130;
+}
+
+.audio-slider {
+  min-width: 8rem;
+  flex: 1 1 auto;
+  accent-color: #2f4438;
 }
 
 .upload-button input {
@@ -835,8 +885,29 @@ code {
     padding: 0.55rem 0;
   }
 
-  .reader-progress span {
+  .reader-progress span,
+  .audio-timeline span:last-child {
     display: none;
+  }
+
+  .reader-header-end {
+    gap: 0.5rem;
+  }
+
+  .reader-audio {
+    min-width: 0;
+    max-width: 52vw;
+    padding: 0.35rem 0.45rem;
+  }
+
+  .audio-button,
+  .audio-skip-button {
+    min-height: 2rem;
+    padding: 0 0.55rem;
+  }
+
+  .audio-slider {
+    min-width: 4.5rem;
   }
 
   .reader-layout {

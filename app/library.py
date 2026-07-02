@@ -12,6 +12,26 @@ from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugi
 
 
 CEFR_FETCH_LOCK = threading.Lock()
+AUDIO_DIR = Path("audio")
+
+
+def chapter_audio_number(chapter_title: str, chapter_index: int) -> int:
+    match = re.match(r"^\s*(\d+)\b", chapter_title)
+    if match:
+        return int(match.group(1))
+    return chapter_index + 1
+
+
+def audio_part_stem(chapter_number: int, part_index: int) -> str:
+    return f"chapter-{chapter_number:02}-part-{part_index + 1:03}"
+
+
+def part_audio_path(book_slug: str, chapter_number: int, part_index: int) -> Path:
+    return AUDIO_DIR / book_slug / f"{audio_part_stem(chapter_number, part_index)}.wav"
+
+
+def part_audio_exists(book_slug: str, chapter_number: int, part_index: int) -> bool:
+    return part_audio_path(book_slug, chapter_number, part_index).exists()
 
 
 def now_iso() -> str:
@@ -303,14 +323,24 @@ def list_books(connection: sqlite3.Connection) -> list[dict[str, object]]:
 def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str, object] | None:
     ensure_cefr_parts(connection, book_id)
     book = connection.execute(
-        "SELECT id, title, author, cefr_status FROM books WHERE id = ?",
+        "SELECT id, slug, title, author, cefr_status FROM books WHERE id = ?",
         (book_id,),
     ).fetchone()
     if not book:
         return None
 
     progress_row = connection.execute(
-        "SELECT last_read_at, last_paragraph_index, last_token_index FROM reading_progress WHERE book_id = ?",
+        """
+        SELECT
+            last_read_at,
+            last_paragraph_index,
+            last_token_index,
+            last_audio_chapter_index,
+            last_audio_part_index,
+            last_audio_time_seconds
+        FROM reading_progress
+        WHERE book_id = ?
+        """,
         (book_id,),
     ).fetchone()
     chapter_rows = connection.execute(
@@ -360,7 +390,17 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
                 "title": chapter["title"],
                 "start_paragraph_index": chapter["start_paragraph_index"],
                 "end_paragraph_index": chapter["end_paragraph_index"],
-                "parts": chapter["parts"],
+                "parts": [
+                    {
+                        **part,
+                        "audio_available": part_audio_exists(
+                            str(book["slug"]),
+                            chapter_audio_number(str(chapter["title"]), int(chapter["chapter_index"])),
+                            int(part["part_index"]),
+                        ),
+                    }
+                    for part in chapter["parts"]
+                ],
             }
             for chapter in grouped_chapters
         ],
@@ -377,6 +417,9 @@ def get_reader_payload(connection: sqlite3.Connection, book_id: int) -> dict[str
             "last_read_at": progress_row["last_read_at"] if progress_row else None,
             "last_paragraph_index": last_paragraph_index,
             "last_token_index": progress_row["last_token_index"] if progress_row else None,
+            "last_audio_chapter_index": int(progress_row["last_audio_chapter_index"]) if progress_row and progress_row["last_audio_chapter_index"] is not None else None,
+            "last_audio_part_index": int(progress_row["last_audio_part_index"]) if progress_row and progress_row["last_audio_part_index"] is not None else None,
+            "last_audio_time_seconds": float(progress_row["last_audio_time_seconds"] or 0.0) if progress_row else 0.0,
             "percent": round((last_paragraph_index / progress_total) * 100, 1) if total_paragraphs else 0.0,
         },
         "total_paragraphs": total_paragraphs,
@@ -610,6 +653,32 @@ def get_book_asset(connection: sqlite3.Connection, book_id: int, chapter_index: 
     if not row:
         return None
     return read_epub_asset(Path(str(row["source_path"])), str(row["source_href"]), unquote(asset_href))
+
+
+def get_book_part_audio_path(
+    connection: sqlite3.Connection,
+    book_id: int,
+    chapter_index: int,
+    part_index: int,
+) -> Path | None:
+    payload = get_reader_payload(connection, book_id)
+    if payload is None:
+        return None
+    chapter = next((item for item in payload["chapters"] if int(item["chapter_index"]) == chapter_index), None)
+    if chapter is None:
+        return None
+    part = next((item for item in chapter["parts"] if int(item["part_index"]) == part_index), None)
+    if part is None or not part.get("audio_available"):
+        return None
+    book = connection.execute("SELECT slug FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        return None
+    path = part_audio_path(
+        str(book["slug"]),
+        chapter_audio_number(str(chapter["title"]), chapter_index),
+        part_index,
+    )
+    return path if path.exists() else None
 
 
 def build_raw_chapter_blocks(
@@ -982,18 +1051,46 @@ def get_cefr_job_status(connection: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def save_progress(connection: sqlite3.Connection, book_id: int, paragraph_index: int, token_index: int | None) -> dict[str, object]:
+def save_progress(
+    connection: sqlite3.Connection,
+    book_id: int,
+    paragraph_index: int,
+    token_index: int | None,
+    *,
+    audio_chapter_index: int | None = None,
+    audio_part_index: int | None = None,
+    audio_time_seconds: float | None = None,
+) -> dict[str, object]:
     timestamp = now_iso()
     connection.execute(
         """
-        INSERT INTO reading_progress (book_id, last_read_at, last_paragraph_index, last_token_index)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO reading_progress (
+            book_id,
+            last_read_at,
+            last_paragraph_index,
+            last_token_index,
+            last_audio_chapter_index,
+            last_audio_part_index,
+            last_audio_time_seconds
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id) DO UPDATE SET
             last_read_at = excluded.last_read_at,
             last_paragraph_index = excluded.last_paragraph_index,
-            last_token_index = excluded.last_token_index
+            last_token_index = excluded.last_token_index,
+            last_audio_chapter_index = COALESCE(excluded.last_audio_chapter_index, reading_progress.last_audio_chapter_index),
+            last_audio_part_index = COALESCE(excluded.last_audio_part_index, reading_progress.last_audio_part_index),
+            last_audio_time_seconds = COALESCE(excluded.last_audio_time_seconds, reading_progress.last_audio_time_seconds)
         """,
-        (book_id, timestamp, paragraph_index, token_index),
+        (
+            book_id,
+            timestamp,
+            paragraph_index,
+            token_index,
+            audio_chapter_index,
+            audio_part_index,
+            audio_time_seconds,
+        ),
     )
     connection.commit()
     payload = get_reader_payload(connection, book_id)

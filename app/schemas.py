@@ -6,12 +6,18 @@ from pydantic import BaseModel, Field
 class ProgressPayload(BaseModel):
     paragraph_index: int = Field(ge=0)
     token_index: int | None = Field(default=None, ge=0)
+    audio_chapter_index: int | None = Field(default=None, ge=0)
+    audio_part_index: int | None = Field(default=None, ge=0)
+    audio_time_seconds: float | None = Field(default=None, ge=0)
 
 
 class ProgressSummary(BaseModel):
     last_read_at: str | None = None
     last_paragraph_index: int = 0
     last_token_index: int | None = None
+    last_audio_chapter_index: int | None = None
+    last_audio_part_index: int | None = None
+    last_audio_time_seconds: float = 0.0
     percent: float = 0.0
 
 
@@ -67,6 +73,7 @@ class ChapterPartRecord(BaseModel):
     title: str
     start_paragraph_index: int
     end_paragraph_index: int
+    audio_available: bool = False
 
 
 class ChapterRecord(BaseModel):

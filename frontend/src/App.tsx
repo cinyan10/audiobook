@@ -56,6 +56,7 @@ type ChapterPartRecord = {
   title: string;
   start_paragraph_index: number;
   end_paragraph_index: number;
+  audio_available: boolean;
 };
 
 type ChapterRecord = {
@@ -78,10 +79,15 @@ type ReaderPayload = {
     last_read_at: string | null;
     last_paragraph_index: number;
     last_token_index: number | null;
+    last_audio_chapter_index: number | null;
+    last_audio_part_index: number | null;
+    last_audio_time_seconds: number;
     percent: number;
   };
   total_paragraphs: number;
 };
+
+type ProgressRecord = ReaderPayload["progress"];
 
 type ChapterPayload = {
   book_id: number;
@@ -109,10 +115,20 @@ type CEFRJobSummary = {
 };
 
 type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
+type NavbarAudioState = {
+  playing: boolean;
+  currentTime: number;
+  duration: number;
+  onTogglePlay: () => void;
+  onSeek: (time: number) => void;
+  onSkip: (deltaSeconds: number) => void;
+};
+
 type NavbarState = {
   title: string | null;
   progressLabel: string | null;
   progressPercent: number;
+  audio: NavbarAudioState | null;
   showSidebarToggle: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: (() => void) | null;
@@ -120,6 +136,7 @@ type NavbarState = {
 
 const LEVEL_LABELS = ["A1", "A2", "B1", "B2", "C1"] as const;
 const SIDEBAR_FLOAT_BREAKPOINT = 1480;
+const AUDIO_PROGRESS_SAVE_MS = 15000;
 
 function App() {
   const [view, setView] = useState<ViewState>(readLocation());
@@ -129,6 +146,7 @@ function App() {
     title: null,
     progressLabel: null,
     progressPercent: 0,
+    audio: null,
     showSidebarToggle: false,
     sidebarOpen: false,
     onToggleSidebar: null,
@@ -147,6 +165,7 @@ function App() {
         title: null,
         progressLabel: null,
         progressPercent: 0,
+        audio: null,
         showSidebarToggle: false,
         sidebarOpen: false,
         onToggleSidebar: null,
@@ -186,6 +205,7 @@ function App() {
         title={navbar.title}
         progressLabel={navbar.progressLabel}
         progressPercent={navbar.progressPercent}
+        audio={navbar.audio}
         showDetails={view.kind === "reader"}
         showSidebarToggle={navbar.showSidebarToggle}
         sidebarOpen={navbar.sidebarOpen}
@@ -211,6 +231,7 @@ function GlobalNavbar({
   title,
   progressLabel,
   progressPercent,
+  audio,
   showDetails,
   showSidebarToggle,
   sidebarOpen,
@@ -223,6 +244,7 @@ function GlobalNavbar({
   title: string | null;
   progressLabel: string | null;
   progressPercent: number;
+  audio: NavbarAudioState | null;
   showDetails: boolean;
   showSidebarToggle: boolean;
   sidebarOpen: boolean;
@@ -256,12 +278,40 @@ function GlobalNavbar({
         <div className="reader-title-block">
           {showDetails ? <h1>{title || "Loading..."}</h1> : null}
         </div>
-        <div className="reader-progress" aria-label={showDetails && progressLabel ? `Reading progress ${progressLabel}` : undefined}>
-          {showDetails ? (
-            <>
-              <ProgressRing percent={progressPercent} label={progressLabel || "0.0%"} />
-              <span>{progressLabel}</span>
-            </>
+        <div className="reader-header-end">
+          <div className="reader-progress" aria-label={showDetails && progressLabel ? `Reading progress ${progressLabel}` : undefined}>
+            {showDetails ? (
+              <>
+                <ProgressRing percent={progressPercent} label={progressLabel || "0.0%"} />
+                <span>{progressLabel}</span>
+              </>
+            ) : null}
+          </div>
+          {audio ? (
+            <div className="reader-audio" aria-label="Audio playback controls">
+              <button className="audio-button" onClick={audio.onTogglePlay} type="button">
+                {audio.playing ? "Pause" : "Play"}
+              </button>
+              <button className="audio-skip-button" onClick={() => audio.onSkip(-10)} type="button">
+                -10s
+              </button>
+              <div className="audio-timeline">
+                <span>{formatClock(audio.currentTime)}</span>
+                <input
+                  className="audio-slider"
+                  type="range"
+                  min={0}
+                  max={Math.max(audio.duration, 0)}
+                  step={0.1}
+                  value={Math.min(audio.currentTime, Math.max(audio.duration, 0))}
+                  onChange={(event) => audio.onSeek(Number(event.target.value))}
+                />
+                <span>{formatClock(audio.duration)}</span>
+              </div>
+              <button className="audio-skip-button" onClick={() => audio.onSkip(10)} type="button">
+                +10s
+              </button>
+            </div>
           ) : null}
           {showInitializeCefr ? (
             <button className="navbar-action-button" onClick={() => void onInitializeCefr()} disabled={initializingCefr} type="button">
@@ -451,10 +501,15 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [loadingCefr, setLoadingCefr] = useState(false);
+  const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const chapterParagraphsRef = useRef<ParagraphRecord[]>([]);
   const paragraphRefs = useRef<Array<HTMLElement | null>>([]);
   const saveTimeoutRef = useRef<number | null>(null);
+  const audioSaveIntervalRef = useRef<number | null>(null);
   const lastSavedRef = useRef<number>(-1);
+  const lastAudioSaveKeyRef = useRef<string>("");
+  const lastLoadedAudioKeyRef = useRef<string>("");
   const lastScrollTargetRef = useRef<string>("");
   const requestedCefrRef = useRef<Set<string>>(new Set());
   const completedCefrRef = useRef<Set<string>>(new Set());
@@ -462,12 +517,20 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   const cefrAbortRef = useRef<AbortController | null>(null);
   const shouldRestoreScrollRef = useRef<boolean>(false);
   const sidebarFloatingRef = useRef(isSidebarFloating);
+  const pendingAudioRestoreRef = useRef<number>(0);
+  const audioContextRef = useRef<{
+    bookId: number;
+    chapterIndex: number;
+    partIndex: number;
+    paragraphIndex: number;
+  } | null>(null);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
+  const currentPart = selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex] ? currentChapter.parts[selectedPartIndex] : null;
   const currentBlocks = chapterCache[selectedChapterIndex] ?? [];
   const visibleBlocks =
-    selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex]
-      ? filterBlocksForPart(currentBlocks, currentChapter.parts[selectedPartIndex])
+    currentPart
+      ? filterBlocksForPart(currentBlocks, currentPart)
       : currentBlocks;
   const currentParagraphs = visibleBlocks.flatMap((block) => (block.kind === "paragraph" ? [block.paragraph] : []));
   const currentChapterWordCounts = currentChapter && chapterCache[selectedChapterIndex] ? countWordsByPart(currentBlocks, currentChapter.parts) : null;
@@ -475,10 +538,44 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
     currentChapterWordCounts && selectedPartIndex !== null ? currentChapterWordCounts[selectedPartIndex] ?? 0 : null;
   const isImageOnlyView = visibleBlocks.length > 0 && visibleBlocks.every((block) => block.kind === "image");
   const scrollTargetKey = `${selectedChapterIndex}:${selectedPartIndex ?? "all"}`;
+  const currentAudioSrc = book && currentPart?.audio_available ? `/api/books/${book.id}/audio/${selectedChapterIndex}/${currentPart.part_index}` : null;
+  const currentAudioKey = book && currentPart ? `${book.id}:${selectedChapterIndex}:${currentPart.part_index}` : "";
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
   }, [currentParagraphs]);
+
+  useEffect(() => {
+    audioContextRef.current =
+      book && currentPart
+        ? {
+            bookId: book.id,
+            chapterIndex: selectedChapterIndex,
+            partIndex: currentPart.part_index,
+            paragraphIndex: resolveProgressParagraphIndex(book.progress.last_paragraph_index, currentPart),
+          }
+        : null;
+  }, [book, currentPart, selectedChapterIndex]);
+
+  const persistAudioProgress = async (force = false) => {
+    const audio = audioRef.current;
+    const context = audioContextRef.current;
+    if (!audio || !context) {
+      return;
+    }
+    const roundedTime = Number(audio.currentTime.toFixed(2));
+    const saveKey = `${context.bookId}:${context.chapterIndex}:${context.partIndex}:${roundedTime.toFixed(2)}`;
+    if (!force && lastAudioSaveKeyRef.current === saveKey) {
+      return;
+    }
+    lastAudioSaveKeyRef.current = saveKey;
+    const progress = await postProgress(context.bookId, context.paragraphIndex, null, {
+      audioChapterIndex: context.chapterIndex,
+      audioPartIndex: context.partIndex,
+      audioTimeSeconds: roundedTime,
+    });
+    setBook((current) => (current && current.id === context.bookId ? { ...current, progress } : current));
+  };
 
   useEffect(() => {
     if (!dialogImage) {
@@ -492,6 +589,56 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [dialogImage]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    const syncAudioState = () => {
+      setAudioState({
+        currentTime: audio.currentTime,
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        playing: !audio.paused,
+      });
+    };
+
+    const onLoadedMetadata = () => {
+      if (pendingAudioRestoreRef.current > 0) {
+        audio.currentTime = Math.min(pendingAudioRestoreRef.current, Number.isFinite(audio.duration) ? audio.duration : pendingAudioRestoreRef.current);
+      }
+      pendingAudioRestoreRef.current = 0;
+      syncAudioState();
+    };
+
+    const onPause = () => {
+      syncAudioState();
+      void persistAudioProgress(true);
+    };
+    const onEnded = () => {
+      syncAudioState();
+      void persistAudioProgress(true);
+    };
+    const onSeeked = () => {
+      syncAudioState();
+    };
+
+    audio.addEventListener("loadedmetadata", onLoadedMetadata);
+    audio.addEventListener("timeupdate", syncAudioState);
+    audio.addEventListener("play", syncAudioState);
+    audio.addEventListener("pause", onPause);
+    audio.addEventListener("seeked", onSeeked);
+    audio.addEventListener("ended", onEnded);
+    return () => {
+      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+      audio.removeEventListener("timeupdate", syncAudioState);
+      audio.removeEventListener("play", syncAudioState);
+      audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("seeked", onSeeked);
+      audio.removeEventListener("ended", onEnded);
+    };
+  }, []);
 
   useEffect(() => {
     const syncSidebarLayout = () => {
@@ -517,6 +664,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
       activeCefrKeyRef.current = "";
       requestedCefrRef.current.clear();
       completedCefrRef.current.clear();
+      lastAudioSaveKeyRef.current = "";
       setChapterCache({});
       try {
         const response = await fetch(`/api/books/${bookId}`);
@@ -581,6 +729,69 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
       active = false;
     };
   }, [book, selectedChapterIndex, chapterCache]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+    if (!currentAudioSrc || !book || !currentPart) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      pendingAudioRestoreRef.current = 0;
+      lastLoadedAudioKeyRef.current = "";
+      setAudioState({ currentTime: 0, duration: 0, playing: false });
+      return;
+    }
+    if (lastLoadedAudioKeyRef.current === currentAudioKey && audio.src.endsWith(currentAudioSrc)) {
+      return;
+    }
+    lastLoadedAudioKeyRef.current = currentAudioKey;
+    pendingAudioRestoreRef.current =
+      book.progress.last_audio_chapter_index === selectedChapterIndex && book.progress.last_audio_part_index === currentPart.part_index
+        ? book.progress.last_audio_time_seconds
+        : 0;
+    audio.pause();
+    audio.src = currentAudioSrc;
+    audio.load();
+    setAudioState({ currentTime: pendingAudioRestoreRef.current, duration: 0, playing: false });
+  }, [
+    book?.id,
+    book?.progress.last_audio_chapter_index,
+    book?.progress.last_audio_part_index,
+    book?.progress.last_audio_time_seconds,
+    currentAudioKey,
+    currentAudioSrc,
+    currentPart,
+    selectedChapterIndex,
+  ]);
+
+  useEffect(() => {
+    if (!audioState.playing || !currentAudioSrc) {
+      if (audioSaveIntervalRef.current !== null) {
+        window.clearInterval(audioSaveIntervalRef.current);
+        audioSaveIntervalRef.current = null;
+      }
+      return;
+    }
+    audioSaveIntervalRef.current = window.setInterval(() => {
+      void persistAudioProgress();
+    }, AUDIO_PROGRESS_SAVE_MS);
+    return () => {
+      if (audioSaveIntervalRef.current !== null) {
+        window.clearInterval(audioSaveIntervalRef.current);
+        audioSaveIntervalRef.current = null;
+      }
+    };
+  }, [audioState.playing, currentAudioSrc]);
+
+  useEffect(
+    () => () => {
+      void persistAudioProgress(true);
+    },
+    [],
+  );
 
   const abortCurrentCefrLoad = () => {
     if (activeCefrKeyRef.current) {
@@ -734,19 +945,13 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
         if (lastSavedRef.current === absoluteParagraphIndex) {
           return;
         }
-        void postProgress(book.id, absoluteParagraphIndex, null).then(() => {
+        void postProgress(book.id, absoluteParagraphIndex, null).then((progress) => {
           lastSavedRef.current = absoluteParagraphIndex;
           setBook((current) =>
             current
               ? {
                   ...current,
-                  progress: {
-                    ...current.progress,
-                    last_paragraph_index: absoluteParagraphIndex,
-                    percent: current.total_paragraphs
-                      ? Number(((absoluteParagraphIndex / current.total_paragraphs) * 100).toFixed(1))
-                      : 0,
-                  },
+                  progress,
                 }
               : current,
           );
@@ -802,6 +1007,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
       }
 
       shouldRestoreScrollRef.current = false;
+      void persistAudioProgress(true);
       setSelectedChapterIndex(nextPartTarget.chapterIndex);
       setSelectedPartIndex(nextPartTarget.partIndex);
     };
@@ -817,6 +1023,45 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
       title: loading ? null : book?.title ?? null,
       progressLabel: loading ? "0.0%" : progressLabel,
       progressPercent: book?.progress.percent ?? 0,
+      audio:
+        currentAudioSrc && audioRef.current
+          ? {
+              playing: audioState.playing,
+              currentTime: audioState.currentTime,
+              duration: audioState.duration,
+              onTogglePlay: () => {
+                const audio = audioRef.current;
+                if (!audio) {
+                  return;
+                }
+                if (audio.paused) {
+                  void audio.play();
+                } else {
+                  audio.pause();
+                }
+              },
+              onSeek: (time) => {
+                const audio = audioRef.current;
+                if (!audio) {
+                  return;
+                }
+                audio.currentTime = Math.max(0, Math.min(time, Number.isFinite(audio.duration) ? audio.duration : time));
+                setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
+              },
+              onSkip: (deltaSeconds) => {
+                const audio = audioRef.current;
+                if (!audio) {
+                  return;
+                }
+                const nextTime = Math.max(
+                  0,
+                  Math.min(audio.currentTime + deltaSeconds, Number.isFinite(audio.duration) ? audio.duration : audio.currentTime + deltaSeconds),
+                );
+                audio.currentTime = nextTime;
+                setAudioState((current) => ({ ...current, currentTime: nextTime }));
+              },
+            }
+          : null,
       showSidebarToggle: true,
       sidebarOpen,
       onToggleSidebar: () => setSidebarOpen((current) => !current),
@@ -826,14 +1071,16 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
         title: null,
         progressLabel: null,
         progressPercent: 0,
+        audio: null,
         showSidebarToggle: false,
         sidebarOpen: false,
         onToggleSidebar: null,
       });
-  }, [book, loading, onNavbarChange, progressLabel, sidebarOpen]);
+  }, [audioState.currentTime, audioState.duration, audioState.playing, book, currentAudioSrc, loading, onNavbarChange, progressLabel, sidebarOpen]);
 
   return (
     <main className="reader-shell">
+      <audio ref={audioRef} preload="metadata" className="visually-hidden" />
       {error ? <p className="error-banner">{error}</p> : null}
 
       {!loading && book ? (
@@ -855,6 +1102,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
                     className={`chapter-link ${chapter.chapter_index === selectedChapterIndex ? "active" : ""}`}
                     onClick={() => {
                       shouldRestoreScrollRef.current = false;
+                      void persistAudioProgress(true);
                       setSelectedChapterIndex(chapter.chapter_index);
                       setSelectedPartIndex(chapter.parts.length ? chapter.parts[0].part_index : null);
                       if (isSidebarFloating) {
@@ -874,6 +1122,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
                           }`}
                           onClick={() => {
                             shouldRestoreScrollRef.current = false;
+                            void persistAudioProgress(true);
                             setSelectedChapterIndex(chapter.chapter_index);
                             setSelectedPartIndex(part.part_index);
                             if (isSidebarFloating) {
@@ -909,9 +1158,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
 
               <div className={`chapter-heading ${isImageOnlyView ? "chapter-heading-image-only" : ""}`}>
                 <h2>{currentChapter?.title || "Loading..."}</h2>
-                {selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex] ? (
-                  <p className="chapter-part-label">{currentChapter.parts[selectedPartIndex].title}</p>
-                ) : null}
+                {currentPart ? <p className="chapter-part-label">{currentPart.title}</p> : null}
               </div>
 
               {visibleBlocks.map((block) =>
@@ -1125,20 +1372,48 @@ function navigateToLibrary() {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-function formatTimestamp(timestamp: string | null): string {
-  if (!timestamp) {
-    return "Not opened yet";
+function resolveProgressParagraphIndex(lastParagraphIndex: number, part: ChapterPartRecord): number {
+  if (lastParagraphIndex >= part.start_paragraph_index && lastParagraphIndex <= part.end_paragraph_index) {
+    return lastParagraphIndex;
   }
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? "Recent activity" : date.toLocaleString();
+  return part.start_paragraph_index;
 }
 
-async function postProgress(bookId: number, paragraphIndex: number, tokenIndex: number | null) {
-  await fetch(`/api/books/${bookId}/progress`, {
+function formatClock(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return "0:00";
+  }
+  const rounded = Math.floor(totalSeconds);
+  const minutes = Math.floor(rounded / 60);
+  const seconds = rounded % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+async function postProgress(
+  bookId: number,
+  paragraphIndex: number,
+  tokenIndex: number | null,
+  audio: {
+    audioChapterIndex: number;
+    audioPartIndex: number;
+    audioTimeSeconds: number;
+  } | null = null,
+): Promise<ProgressRecord> {
+  const response = await fetch(`/api/books/${bookId}/progress`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ paragraph_index: paragraphIndex, token_index: tokenIndex }),
+    body: JSON.stringify({
+      paragraph_index: paragraphIndex,
+      token_index: tokenIndex,
+      audio_chapter_index: audio?.audioChapterIndex ?? null,
+      audio_part_index: audio?.audioPartIndex ?? null,
+      audio_time_seconds: audio?.audioTimeSeconds ?? null,
+    }),
   });
+  if (!response.ok) {
+    throw new Error(`Failed to save progress (${response.status})`);
+  }
+  return (await response.json()) as ProgressRecord;
 }
 
 export default App;

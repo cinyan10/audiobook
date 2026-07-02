@@ -68,7 +68,10 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
     last_read_at TEXT NOT NULL,
     last_paragraph_index INTEGER NOT NULL DEFAULT 0,
-    last_token_index INTEGER
+    last_token_index INTEGER,
+    last_audio_chapter_index INTEGER,
+    last_audio_part_index INTEGER,
+    last_audio_time_seconds REAL
 );
 
 CREATE TABLE IF NOT EXISTS cefr_jobs (
@@ -104,6 +107,13 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 def init_db(db_path: Path = DB_PATH) -> None:
     with connect(db_path) as connection:
         connection.executescript(SCHEMA)
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(reading_progress)")}
+        if "last_audio_chapter_index" not in columns:
+            connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_chapter_index INTEGER")
+        if "last_audio_part_index" not in columns:
+            connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_part_index INTEGER")
+        if "last_audio_time_seconds" not in columns:
+            connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_time_seconds REAL")
         connection.commit()
 
 

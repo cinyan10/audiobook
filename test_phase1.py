@@ -8,7 +8,7 @@ from zipfile import ZipFile
 
 from app.db import connect, init_db
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
+from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -312,6 +312,82 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "First part.")
             self.assertEqual(chapter["blocks"][1]["paragraph"]["text"], "Second part.")
             self.assertEqual("".join(token["text"] for token in chapter["blocks"][1]["paragraph"]["tokens"]), "Second part.")
+            connection.close()
+
+    def test_part_audio_is_discovered_and_audio_progress_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, ORNAMENT_CHAPTER_HTML)
+
+            audio_path = root / "audio" / "test-book" / "chapter-01-part-002.wav"
+            audio_path.parent.mkdir(parents=True)
+            audio_path.write_bytes(b"fake wav")
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, status = import_book(connection, epub_path)
+            self.assertEqual(status, "imported")
+            book_id = int(summary["id"])
+
+            connection.execute(
+                "UPDATE book_paragraphs SET paragraph_index = 2 WHERE book_id = ? AND paragraph_index = 1",
+                (book_id,),
+            )
+            connection.execute(
+                "UPDATE book_tokens SET paragraph_index = 2 WHERE book_id = ? AND paragraph_index = 1",
+                (book_id,),
+            )
+            connection.execute(
+                "INSERT INTO book_paragraphs (book_id, paragraph_index, text) VALUES (?, 1, ?)",
+                (book_id, "X X X"),
+            )
+            connection.executemany(
+                """
+                INSERT INTO book_tokens (book_id, token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip)
+                VALUES (?, ?, 1, ?, ?, NULL, NULL)
+                """,
+                [
+                    (book_id, 100, "X", "x"),
+                    (book_id, 101, " ", ""),
+                    (book_id, 102, "X", "x"),
+                    (book_id, 103, " ", ""),
+                    (book_id, 104, "X", "x"),
+                ],
+            )
+            connection.execute(
+                "UPDATE book_chapters SET end_paragraph_index = 2 WHERE book_id = ? AND chapter_index = 0",
+                (book_id,),
+            )
+            connection.commit()
+
+            with patch("app.library.AUDIO_DIR", root / "audio"):
+                reader = get_reader_payload(connection, book_id)
+                assert reader is not None
+                self.assertEqual(
+                    [part["audio_available"] for part in reader["chapters"][0]["parts"]],
+                    [False, True],
+                )
+                self.assertIsNone(get_book_part_audio_path(connection, book_id, 0, 0))
+                self.assertEqual(get_book_part_audio_path(connection, book_id, 0, 1), audio_path)
+
+                progress = save_progress(
+                    connection,
+                    book_id,
+                    2,
+                    None,
+                    audio_chapter_index=0,
+                    audio_part_index=1,
+                    audio_time_seconds=12.5,
+                )
+
+            self.assertEqual(progress["last_audio_chapter_index"], 0)
+            self.assertEqual(progress["last_audio_part_index"], 1)
+            self.assertAlmostEqual(progress["last_audio_time_seconds"], 12.5)
             connection.close()
 
     def test_redundant_title_with_leading_dashes_is_skipped(self) -> None:

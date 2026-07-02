@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from uvicorn.logging import AccessFormatter, DefaultFormatter
 
@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
+from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
 from app.schemas import BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
@@ -195,6 +195,19 @@ def get_book_cover(
     return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/books/{book_id}/audio/{chapter_index}/{part_index}")
+def get_book_part_audio(
+    book_id: Annotated[int, PathParam(ge=1)],
+    chapter_index: Annotated[int, PathParam(ge=0)],
+    part_index: Annotated[int, PathParam(ge=0)],
+) -> FileResponse:
+    with get_connection() as connection:
+        path = get_book_part_audio_path(connection, book_id, chapter_index, part_index)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Audio not found.")
+    return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+
 @app.post("/api/books/{book_id}/cefr-parts/{part_index}/load", response_model=CEFRPartLoadSummary)
 def load_book_part_cefr(
     book_id: Annotated[int, PathParam(ge=1)],
@@ -245,7 +258,15 @@ def update_progress(book_id: Annotated[int, PathParam(ge=1)], payload: ProgressP
         book = get_reader_payload(connection, book_id)
         if book is None:
             raise HTTPException(status_code=404, detail="Book not found.")
-        return save_progress(connection, book_id, payload.paragraph_index, payload.token_index)
+        return save_progress(
+            connection,
+            book_id,
+            payload.paragraph_index,
+            payload.token_index,
+            audio_chapter_index=payload.audio_chapter_index,
+            audio_part_index=payload.audio_part_index,
+            audio_time_seconds=payload.audio_time_seconds,
+        )
 
 
 @app.get("/api/cefr/initialize", response_model=CEFRJobSummary)
