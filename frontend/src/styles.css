@@ -144,6 +144,10 @@ code {
   justify-content: flex-start;
 }
 
+.reader-header-compact .reader-progress {
+  margin-left: auto;
+}
+
 .reader-nav-start {
   display: inline-flex;
   align-items: center;
@@ -282,6 +286,21 @@ code {
 .secondary-button {
   background: rgba(36, 27, 21, 0.08);
   color: #3c3028;
+}
+
+.navbar-action-button {
+  min-height: 2.4rem;
+  padding: 0 0.9rem;
+  border-radius: 999px;
+  background: #1c4a82;
+  color: #eef6ff;
+  font: 700 0.74rem/1 "Cascadia Code", "SFMono-Regular", monospace;
+  letter-spacing: 0.04em;
+}
+
+.navbar-action-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
 }
 
 .upload-button input {
@@ -885,6 +904,15 @@ code {
   animation: shelf-enter 420ms ease both;
 }
 
+.library-book-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+}
+
 .library-book:nth-child(2n) {
   animation-delay: 40ms;
 }
@@ -977,11 +1005,18 @@ code {
 }
 
 .library-book-meta {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
   min-height: 1.8rem;
+}
+
+.library-progress-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
 }
 
 .library-badge {
@@ -1005,11 +1040,68 @@ code {
   color: rgba(52, 41, 31, 0.72);
 }
 
+.library-cefr-ring {
+  width: 1.85rem;
+  height: 1.85rem;
+}
+
+.library-cefr-ring .progress-ring-track,
+.library-cefr-ring .progress-ring-fill {
+  stroke-width: 8;
+}
+
+.library-cefr-ring .progress-ring-fill {
+  stroke: #1c76c5;
+}
+
+.library-cefr-ring text {
+  font-size: 1.25rem;
+  fill: #1c4a82;
+}
+
+.library-book-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .library-book-menu {
+  width: 2rem;
+  height: 1.8rem;
+  padding: 0;
+  background: transparent;
   color: rgba(92, 77, 62, 0.54);
   font-size: 1.25rem;
   line-height: 1;
   letter-spacing: 0.12em;
+}
+
+.library-action-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 5;
+  min-width: 11rem;
+  padding: 0.35rem;
+  background: rgba(255, 250, 244, 0.98);
+  border: 1px solid rgba(82, 57, 35, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(82, 57, 35, 0.18);
+}
+
+.library-action-menu button {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: 6px;
+  background: transparent;
+  color: #2d231b;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.library-action-menu button:hover,
+.library-action-menu button:focus-visible {
+  background: rgba(28, 74, 130, 0.08);
 }
 
 .library-book-add .library-cover {

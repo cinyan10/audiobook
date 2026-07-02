@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 from io import BytesIO
 import mimetypes
 from pathlib import Path
@@ -9,10 +11,11 @@ import sys
 from typing import Annotated
 from urllib.parse import unquote
 
-from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile
+from fastapi import FastAPI, File, HTTPException, Path as PathParam, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from uvicorn.logging import AccessFormatter, DefaultFormatter
 
 from app.cefr import fetch_indexed_paragraph_tokens
 from app.epub import read_epub_zip_asset
@@ -27,7 +30,7 @@ except ModuleNotFoundError:
 
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, save_progress, scan_books_directory, store_uploaded_book
+from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
 from app.schemas import BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
@@ -36,10 +39,27 @@ FRONTEND_DIST = Path("frontend") / "dist"
 cefr_batch_runner = CEFRBatchRunner()
 
 
+def configure_log_timestamps() -> None:
+    default_formatter = DefaultFormatter("%(asctime)s %(levelprefix)s %(message)s", "%H:%M:%S", use_colors=True)
+    access_formatter = AccessFormatter(
+        '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+        "%H:%M:%S",
+        use_colors=True,
+    )
+    for name, formatter in (("uvicorn", default_formatter), ("uvicorn.error", default_formatter), ("uvicorn.access", access_formatter)):
+        for handler in logging.getLogger(name).handlers:
+            handler.setFormatter(formatter)
+
+
+configure_log_timestamps()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_log_timestamps()
     init_db()
     with get_connection() as connection:
+        recover_interrupted_cefr_jobs(connection)
         scan_books_directory(connection, BOOKS_DIR, with_cefr=False)
         for book in list_books(connection):
             ensure_cefr_parts(connection, int(book["id"]))
@@ -185,9 +205,27 @@ def load_book_part_cefr(
         if book is None:
             raise HTTPException(status_code=404, detail="Book not found.")
         try:
-            return enrich_book_part_cefr(connection, book_id, part_index)
+            return enrich_book_part_cefr(
+                connection,
+                book_id,
+                part_index,
+                cancel_scope=f"reader-book-{book_id}",
+                cancel_existing=True,
+            )
         except Exception:
             return get_cefr_part_payload(connection, book_id, part_index)
+
+
+@app.post("/api/books/{book_id}/cefr/initialize", response_model=CEFRJobSummary)
+def cefr_initialize_book_start(book_id: Annotated[int, PathParam(ge=1)]) -> dict[str, object]:
+    with get_connection() as connection:
+        book = get_reader_payload(connection, book_id)
+    if book is None:
+        raise HTTPException(status_code=404, detail="Book not found.")
+    try:
+        return cefr_batch_runner.start(book_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/cefr/check", response_model=CEFRCheckSummary)
@@ -214,6 +252,27 @@ def update_progress(book_id: Annotated[int, PathParam(ge=1)], payload: ProgressP
 def cefr_initialize_status() -> dict[str, object]:
     with get_connection() as connection:
         return get_cefr_job_status(connection)
+
+
+@app.websocket("/api/cefr/events")
+async def cefr_events(websocket: WebSocket) -> None:
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    def listener(job: dict[str, object]) -> None:
+        loop.call_soon_threadsafe(events.put_nowait, job)
+
+    cefr_batch_runner.add_listener(listener)
+    try:
+        await websocket.send_json(cefr_batch_runner.status())
+        while True:
+            job = await events.get()
+            await websocket.send_json(job)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        cefr_batch_runner.remove_listener(listener)
 
 
 @app.post("/api/cefr/initialize", response_model=CEFRJobSummary)

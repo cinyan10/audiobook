@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from urllib.parse import quote, unquote
 
-from app.cefr import MAX_CEFR_CHARS, fetch_paragraph_tokens, normalize_text, plain_tokens
+from app.cefr import MAX_CEFR_CHARS, cancel_cefr_fetch, fetch_paragraph_tokens, normalize_text, plain_tokens
 from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugify
 
 
@@ -424,8 +424,18 @@ def get_chapter_payload(connection: sqlite3.Connection, book_id: int, chapter_in
     }
 
 
-def enrich_book_part_cefr(connection: sqlite3.Connection, book_id: int, part_index: int) -> dict[str, object]:
+def enrich_book_part_cefr(
+    connection: sqlite3.Connection,
+    book_id: int,
+    part_index: int,
+    *,
+    cancel_scope: str | None = None,
+    cancel_existing: bool = False,
+) -> dict[str, object]:
     ensure_cefr_parts(connection, book_id)
+    book = connection.execute("SELECT title FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        raise ValueError(f"Book {book_id} does not exist.")
     part = connection.execute(
         """
         SELECT part_index, start_paragraph_index, end_paragraph_index, status
@@ -450,6 +460,12 @@ def enrich_book_part_cefr(connection: sqlite3.Connection, book_id: int, part_ind
     ).fetchall()
     if not paragraphs:
         raise ValueError(f"Book {book_id} part {part_index} has no paragraphs.")
+    visible_paragraphs = [
+        paragraph
+        for paragraph in paragraphs
+        if not is_redundant_title_paragraph(str(book["title"]), str(paragraph["text"]))
+        and not is_divider_paragraph(str(paragraph["text"]))
+    ]
 
     connection.execute(
         "UPDATE book_cefr_parts SET status = ?, updated_at = ?, error_message = NULL WHERE book_id = ? AND part_index = ?",
@@ -458,9 +474,16 @@ def enrich_book_part_cefr(connection: sqlite3.Connection, book_id: int, part_ind
     connection.commit()
 
     try:
-        with CEFR_FETCH_LOCK:
-            grouped_tokens = fetch_paragraph_tokens([paragraph["text"] for paragraph in paragraphs])
-        for offset, paragraph in enumerate(paragraphs):
+        grouped_tokens: list[list[dict[str, str]]] = []
+        if visible_paragraphs:
+            if cancel_scope and cancel_existing:
+                cancel_cefr_fetch(cancel_scope)
+            with CEFR_FETCH_LOCK:
+                grouped_tokens = fetch_paragraph_tokens(
+                    [paragraph["text"] for paragraph in visible_paragraphs],
+                    scope=cancel_scope,
+                )
+        for offset, paragraph in enumerate(visible_paragraphs):
             paragraph_index = int(paragraph["paragraph_index"])
             current_tokens = connection.execute(
                 """
@@ -787,37 +810,79 @@ def update_book_cefr_status(connection: sqlite3.Connection, book_id: int) -> str
     return status
 
 
-def next_pending_cefr_part(connection: sqlite3.Connection) -> tuple[int, int, str] | None:
+def next_pending_cefr_part(connection: sqlite3.Connection, book_id: int | None = None) -> tuple[int, int, str] | None:
+    book_filter = "AND cp.book_id = ?" if book_id is not None else ""
+    params = (book_id,) if book_id is not None else ()
     row = connection.execute(
-        """
-        SELECT cp.book_id, cp.part_index, b.title
+        f"""
+        SELECT cp.book_id, cp.part_index, cp.start_paragraph_index, b.title
         FROM book_cefr_parts cp
         JOIN books b ON b.id = cp.book_id
-        WHERE cp.status IN ('pending', 'error')
+        WHERE cp.status IN ('pending', 'error', 'loading')
+        {book_filter}
         ORDER BY COALESCE((SELECT last_read_at FROM reading_progress rp WHERE rp.book_id = b.id), b.updated_at) DESC,
                  b.id ASC,
                  cp.part_index ASC
         LIMIT 1
-        """
+        """,
+        params,
     ).fetchone()
     if not row:
         return None
-    return int(row["book_id"]), int(row["part_index"]), f"{row['title']} · part {int(row['part_index']) + 1}"
+    target_book_id = int(row["book_id"])
+    return (
+        target_book_id,
+        int(row["part_index"]),
+        cefr_sidebar_label(connection, target_book_id, int(row["start_paragraph_index"]), str(row["title"])),
+    )
 
 
-def start_cefr_job(connection: sqlite3.Connection) -> dict[str, object]:
+def cefr_sidebar_label(connection: sqlite3.Connection, book_id: int, paragraph_index: int, book_title: str) -> str:
+    chapter_rows = connection.execute(
+        """
+        SELECT chapter_index, title, source_href, start_paragraph_index, end_paragraph_index
+        FROM book_chapters
+        WHERE book_id = ?
+        ORDER BY chapter_index
+        """,
+        (book_id,),
+    ).fetchall()
+    paragraph_rows = connection.execute(
+        "SELECT paragraph_index, text FROM book_paragraphs WHERE book_id = ? ORDER BY paragraph_index",
+        (book_id,),
+    ).fetchall()
+    for chapter in build_reader_chapters(chapter_rows, paragraph_rows):
+        if not int(chapter["start_paragraph_index"]) <= paragraph_index <= int(chapter["end_paragraph_index"]):
+            continue
+        for part in chapter["parts"]:
+            if int(part["start_paragraph_index"]) <= paragraph_index <= int(part["end_paragraph_index"]):
+                return f"{book_title} · {chapter['title']} · {part['title']}"
+        return f"{book_title} · {chapter['title']}"
+    return book_title
+
+
+def start_cefr_job(connection: sqlite3.Connection, book_id: int | None = None) -> dict[str, object]:
     running = connection.execute(
         "SELECT id FROM cefr_jobs WHERE status = 'running' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if running:
         return get_cefr_job_status(connection)
+    if book_id is not None:
+        book = connection.execute("SELECT id FROM books WHERE id = ?", (book_id,)).fetchone()
+        if not book:
+            raise ValueError(f"Book {book_id} does not exist.")
+        ensure_cefr_parts(connection, book_id)
+    book_filter = "WHERE book_id = ?" if book_id is not None else ""
+    params = (book_id,) if book_id is not None else ()
     counts = connection.execute(
-        """
+        f"""
         SELECT
             COUNT(*) AS total_parts,
             SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS ready_parts
         FROM book_cefr_parts
-        """
+        {book_filter}
+        """,
+        params,
     ).fetchone()
     total_parts = int(counts["total_parts"] or 0)
     ready_parts = int(counts["ready_parts"] or 0)
@@ -832,6 +897,19 @@ def start_cefr_job(connection: sqlite3.Connection) -> dict[str, object]:
     )
     connection.commit()
     return get_cefr_job_status(connection)
+
+
+def recover_interrupted_cefr_jobs(connection: sqlite3.Connection) -> None:
+    timestamp = now_iso()
+    connection.execute(
+        """
+        UPDATE cefr_jobs
+        SET status = ?, error_message = COALESCE(error_message, ?), updated_at = ?, finished_at = COALESCE(finished_at, ?)
+        WHERE status = ?
+        """,
+        ("interrupted", "Server restarted before the CEFR job finished.", timestamp, timestamp, "running"),
+    )
+    connection.commit()
 
 
 def update_cefr_job_progress(
@@ -965,6 +1043,7 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
     percent = round((current_paragraph / total_paragraphs) * 100, 1) if row["total_paragraphs"] else 0.0
     ready_parts = int(row["ready_parts"] or 0)
     total_parts = int(row["total_parts"] or 0)
+    cefr_percent = round((ready_parts / total_parts) * 100, 1) if total_parts else 0.0
     return {
         "id": int(row["id"]),
         "title": row["title"],
@@ -974,6 +1053,7 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
         "cefr_status": row["cefr_status"],
         "cefr_ready_parts": ready_parts,
         "cefr_total_parts": total_parts,
+        "cefr_percent": cefr_percent,
         "progress_percent": percent,
         "progress_label": f"Paragraph {min(current_paragraph + 1, total_paragraphs)} of {total_paragraphs}",
         "last_read_at": row["last_read_at"],

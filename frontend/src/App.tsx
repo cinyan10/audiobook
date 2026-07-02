@@ -9,6 +9,7 @@ type BookSummary = {
   cefr_status: string;
   cefr_ready_parts: number;
   cefr_total_parts: number;
+  cefr_percent: number;
   progress_percent: number;
   progress_label: string;
   last_read_at: string | null;
@@ -89,8 +90,22 @@ type ChapterPayload = {
   blocks: ChapterBlock[];
 };
 
-type CEFRCheckSummary = {
+type CEFRPartLoadSummary = {
+  book_id: number;
+  part_index: number;
+  status: string;
   paragraphs: ParagraphRecord[];
+  cefr: CEFRSummary;
+};
+
+type CEFRJobSummary = {
+  id: number | null;
+  status: string;
+  total_parts: number;
+  completed_parts: number;
+  ready_parts: number;
+  current_label: string | null;
+  error_message: string | null;
 };
 
 type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
@@ -104,12 +119,12 @@ type NavbarState = {
 };
 
 const LEVEL_LABELS = ["A1", "A2", "B1", "B2", "C1"] as const;
-const CEFR_CACHE_PREFIX = "audiobook-cefr:v1";
-const MAX_CEFR_BATCH_WORDS = 5000;
 const SIDEBAR_FLOAT_BREAKPOINT = 1480;
 
 function App() {
   const [view, setView] = useState<ViewState>(readLocation());
+  const [cefrJobRunning, setCefrJobRunning] = useState(false);
+  const [libraryRefreshSignal, setLibraryRefreshSignal] = useState(0);
   const [navbar, setNavbar] = useState<NavbarState>({
     title: null,
     progressLabel: null,
@@ -139,6 +154,29 @@ function App() {
     }
   }, [view]);
 
+  useEffect(() => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/cefr/events`);
+    socket.onmessage = (event) => {
+      const job = JSON.parse(event.data) as CEFRJobSummary;
+      setCefrJobRunning(job.status === "running");
+      setLibraryRefreshSignal((current) => current + 1);
+    };
+    return () => socket.close();
+  }, []);
+
+  const handleInitializeAllCefr = async () => {
+    setCefrJobRunning(true);
+    const response = await fetch("/api/cefr/initialize", { method: "POST" });
+    if (!response.ok) {
+      setCefrJobRunning(false);
+      return;
+    }
+    const job = (await response.json()) as CEFRJobSummary;
+    setCefrJobRunning(job.status === "running");
+    setLibraryRefreshSignal((current) => current + 1);
+  };
+
   return (
     <div className="shell">
       <div className="ambient ambient-left" />
@@ -152,9 +190,15 @@ function App() {
         showSidebarToggle={navbar.showSidebarToggle}
         sidebarOpen={navbar.sidebarOpen}
         onToggleSidebar={navbar.onToggleSidebar}
+        showInitializeCefr={view.kind === "library"}
+        initializingCefr={cefrJobRunning}
+        onInitializeCefr={handleInitializeAllCefr}
       />
       {view.kind === "library" ? (
-        <LibraryPage onOpenBook={(bookId) => navigateToBook(bookId)} />
+        <LibraryPage
+          onOpenBook={(bookId) => navigateToBook(bookId)}
+          refreshSignal={libraryRefreshSignal}
+        />
       ) : (
         <ReaderPage bookId={view.bookId} onNavbarChange={setNavbar} />
       )}
@@ -171,6 +215,9 @@ function GlobalNavbar({
   showSidebarToggle,
   sidebarOpen,
   onToggleSidebar,
+  showInitializeCefr,
+  initializingCefr,
+  onInitializeCefr,
 }: {
   onHome: () => void;
   title: string | null;
@@ -180,6 +227,9 @@ function GlobalNavbar({
   showSidebarToggle: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: (() => void) | null;
+  showInitializeCefr: boolean;
+  initializingCefr: boolean;
+  onInitializeCefr: () => void;
 }) {
   return (
     <nav className="reader-navbar" aria-label="Reader navigation">
@@ -213,17 +263,29 @@ function GlobalNavbar({
               <span>{progressLabel}</span>
             </>
           ) : null}
+          {showInitializeCefr ? (
+            <button className="navbar-action-button" onClick={() => void onInitializeCefr()} disabled={initializingCefr} type="button">
+              {initializingCefr ? "Checking..." : "Initialize CEFR"}
+            </button>
+          ) : null}
         </div>
       </div>
     </nav>
   );
 }
 
-function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
+function LibraryPage({
+  onOpenBook,
+  refreshSignal,
+}: {
+  onOpenBook: (bookId: number) => void;
+  refreshSignal: number;
+}) {
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [openMenuBookId, setOpenMenuBookId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadBooks = async ({ refresh = false }: { refresh?: boolean } = {}) => {
@@ -253,6 +315,13 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
     void loadBooks({ refresh: true });
   }, []);
 
+  useEffect(() => {
+    if (!refreshSignal) {
+      return;
+    }
+    void loadBooks();
+  }, [refreshSignal]);
+
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
@@ -278,6 +347,19 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
     }
   };
 
+  const handleInitializeBookCefr = async (bookId: number) => {
+    setOpenMenuBookId(null);
+    try {
+      const response = await fetch(`/api/books/${bookId}/cefr/initialize`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`Initialize failed (${response.status})`);
+      }
+      await loadBooks();
+    } catch (initializeError) {
+      setError(initializeError instanceof Error ? initializeError.message : "Initialize failed.");
+    }
+  };
+
   return (
     <main className="page library-page">
       <input
@@ -291,31 +373,53 @@ function LibraryPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
       {error ? <p className="error-banner">{error}</p> : null}
       <section className="library-grid" aria-label="Library">
         {books.map((book, index) => (
-          <button
+          <article
             key={book.id}
             className={`library-book ${coverToneClass(index)}`}
-            onClick={() => onOpenBook(book.id)}
-            type="button"
           >
-            <div className="library-cover">
-              {book.cover_url ? (
-                <img src={book.cover_url} alt={book.title} className="library-cover-image" />
-              ) : (
-                <div className="library-cover-placeholder">
-                  <p>{book.title}</p>
-                  <span>{book.author || "Unknown author"}</span>
-                </div>
-              )}
-            </div>
+            <button className="library-book-open" onClick={() => onOpenBook(book.id)} type="button">
+              <div className="library-cover">
+                {book.cover_url ? (
+                  <img src={book.cover_url} alt={book.title} className="library-cover-image" />
+                ) : (
+                  <div className="library-cover-placeholder">
+                    <p>{book.title}</p>
+                    <span>{book.author || "Unknown author"}</span>
+                  </div>
+                )}
+              </div>
+            </button>
             <div className="library-book-meta">
-              <span className={`library-badge ${book.last_read_at ? "progress" : "new"}`}>
-                {book.last_read_at ? `${Math.round(book.progress_percent)}%` : "NEW"}
+              <span className="library-progress-group">
+                <span className={`library-badge ${book.last_read_at ? "progress" : "new"}`}>
+                  {book.last_read_at ? `${Math.round(book.progress_percent)}%` : "NEW"}
+                </span>
+                <ProgressRing
+                  percent={book.cefr_percent}
+                  label={`${Math.round(book.cefr_percent)}%`}
+                  className="library-cefr-ring"
+                />
               </span>
-              <span className="library-book-menu" aria-hidden="true">
-                •••
+              <span className="library-book-actions">
+                <button
+                  className="library-book-menu"
+                  aria-label={`Actions for ${book.title}`}
+                  aria-expanded={openMenuBookId === book.id}
+                  onClick={() => setOpenMenuBookId((current) => (current === book.id ? null : book.id))}
+                  type="button"
+                >
+                  •••
+                </button>
+                {openMenuBookId === book.id ? (
+                  <span className="library-action-menu">
+                    <button onClick={() => void handleInitializeBookCefr(book.id)} type="button">
+                      Initialize CEFR
+                    </button>
+                  </span>
+                ) : null}
               </span>
             </div>
-          </button>
+          </article>
         ))}
         <button
           className={`library-book library-book-add ${uploading ? "is-uploading" : ""}`}
@@ -489,18 +593,15 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   };
 
   const ensureVisibleCefrLoaded = async (currentBookId: number, paragraphs: ParagraphRecord[]) => {
-    if (!paragraphs.length || paragraphsHaveCefr(paragraphs)) {
+    if (!book || !paragraphs.length) {
       return;
     }
-    const cacheKey = cefrCacheKey(currentBookId, paragraphs);
+    const parts = findOverlappingCefrParts(book.cefr_parts, paragraphs).filter((part) => part.status !== "ready");
+    if (!parts.length) {
+      return;
+    }
+    const cacheKey = `${currentBookId}:${parts.map((part) => part.part_index).join(",")}`;
     if (completedCefrRef.current.has(cacheKey) || requestedCefrRef.current.has(cacheKey)) {
-      return;
-    }
-
-    const cached = readCachedParagraphs(cacheKey);
-    if (cached) {
-      completedCefrRef.current.add(cacheKey);
-      setChapterCache((current) => mergeParagraphsIntoChapters(current, cached));
       return;
     }
 
@@ -515,16 +616,11 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
     setLoadingCefr(true);
     try {
       const enriched: ParagraphRecord[] = [];
-      for (const batch of splitParagraphBatches(paragraphs)) {
-        const response = await fetch("/api/cefr/check", {
+      const statuses = new Map<number, string>();
+      let cefrSummary: CEFRSummary | null = null;
+      for (const part of parts) {
+        const response = await fetch(`/api/books/${currentBookId}/cefr-parts/${part.part_index}/load`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            paragraphs: batch.map((paragraph) => ({
-              paragraph_index: paragraph.paragraph_index,
-              text: paragraph.text,
-            })),
-          }),
           signal: controller.signal,
         });
         if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
@@ -533,18 +629,31 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
         if (!response.ok) {
           throw new Error(`Failed to load CEFR from Oxford (${response.status})`);
         }
-        const payload = (await response.json()) as CEFRCheckSummary;
+        const payload = (await response.json()) as CEFRPartLoadSummary;
         if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
           return;
         }
         enriched.push(...payload.paragraphs);
+        statuses.set(payload.part_index, payload.status);
+        cefrSummary = payload.cefr;
       }
       if (controller.signal.aborted || activeCefrKeyRef.current !== cacheKey) {
         return;
       }
-      writeCachedParagraphs(cacheKey, enriched);
       completedCefrRef.current.add(cacheKey);
       setChapterCache((current) => mergeParagraphsIntoChapters(current, enriched));
+      setBook((current) =>
+        current && current.id === currentBookId
+          ? {
+              ...current,
+              cefr_status: cefrSummary?.status ?? current.cefr_status,
+              cefr: cefrSummary ?? current.cefr,
+              cefr_parts: current.cefr_parts.map((part) =>
+                statuses.has(part.part_index) ? { ...part, status: statuses.get(part.part_index) ?? part.status } : part,
+              ),
+            }
+          : current,
+      );
     } catch (loadError) {
       if (loadError instanceof DOMException && loadError.name === "AbortError") {
         return;
@@ -858,12 +967,12 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   );
 }
 
-function ProgressRing({ percent, label }: { percent: number; label: string }) {
+function ProgressRing({ percent, label, className = "" }: { percent: number; label: string; className?: string }) {
   const radius = 32;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - percent / 100);
   return (
-    <svg className="progress-ring" viewBox="0 0 80 80" aria-hidden="true">
+    <svg className={`progress-ring ${className}`.trim()} viewBox="0 0 80 80" aria-hidden="true">
       <circle className="progress-ring-track" cx="40" cy="40" r={radius} />
       <circle className="progress-ring-fill" cx="40" cy="40" r={radius} style={{ strokeDasharray: circumference, strokeDashoffset: offset }} />
       <text x="40" y="45" textAnchor="middle">
@@ -886,68 +995,18 @@ function mergeParagraphsIntoChapters(current: Record<number, ChapterBlock[]>, pa
   return next;
 }
 
-function splitParagraphBatches(paragraphs: ParagraphRecord[]): ParagraphRecord[][] {
-  const batches: ParagraphRecord[][] = [];
-  let current: ParagraphRecord[] = [];
-  let currentWords = 0;
-  for (const paragraph of paragraphs) {
-    const words = countWords(paragraph.text);
-    if (current.length && currentWords + words > MAX_CEFR_BATCH_WORDS) {
-      batches.push(current);
-      current = [];
-      currentWords = 0;
-    }
-    current.push(paragraph);
-    currentWords += words;
-  }
-  if (current.length) {
-    batches.push(current);
-  }
-  return batches;
-}
-
-function paragraphsHaveCefr(paragraphs: ParagraphRecord[]): boolean {
-  return paragraphs.some((paragraph) => paragraph.tokens.some((token) => Boolean(token.cefr_level)));
-}
-
-function cefrCacheKey(bookId: number, paragraphs: ParagraphRecord[]): string {
-  const first = paragraphs[0]?.paragraph_index ?? 0;
-  const last = paragraphs[paragraphs.length - 1]?.paragraph_index ?? first;
-  return `${CEFR_CACHE_PREFIX}:${bookId}:${first}-${last}:${textSignature(paragraphs)}`;
-}
-
-function textSignature(paragraphs: ParagraphRecord[]): string {
-  let hash = 0;
-  let words = 0;
-  for (const paragraph of paragraphs) {
-    words += countWords(paragraph.text);
-    for (let index = 0; index < paragraph.text.length; index += 1) {
-      hash = (hash * 31 + paragraph.text.charCodeAt(index)) | 0;
-    }
-  }
-  return `${words}-${(hash >>> 0).toString(36)}`;
-}
-
-function readCachedParagraphs(cacheKey: string): ParagraphRecord[] | null {
-  try {
-    const cached = window.localStorage.getItem(cacheKey);
-    return cached ? (JSON.parse(cached) as ParagraphRecord[]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedParagraphs(cacheKey: string, paragraphs: ParagraphRecord[]) {
-  try {
-    window.localStorage.setItem(cacheKey, JSON.stringify(paragraphs));
-  } catch {
-    // localStorage is best-effort; the reader still works without persistence.
-  }
-}
-
 function coverToneClass(index: number): string {
   const tones = ["tone-sage", "tone-graphite", "tone-umber", "tone-plum"];
   return tones[index % tones.length];
+}
+
+function findOverlappingCefrParts(parts: CEFRPartRecord[], paragraphs: ParagraphRecord[]): CEFRPartRecord[] {
+  const first = paragraphs[0]?.paragraph_index;
+  const last = paragraphs[paragraphs.length - 1]?.paragraph_index;
+  if (first === undefined || last === undefined) {
+    return [];
+  }
+  return parts.filter((part) => part.start_paragraph_index <= last && part.end_paragraph_index >= first);
 }
 
 function findChapterIndex(chapters: ChapterRecord[], paragraphIndex: number): number {

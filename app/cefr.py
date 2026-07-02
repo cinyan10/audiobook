@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 
-from oxford_cefr import LEVEL_COLORS, fetch_tokens
+from oxford_cefr import LEVEL_COLORS, cancel_active_cli, fetch_tokens
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*")
@@ -38,6 +38,10 @@ def plain_tokens(text: str) -> list[dict[str, str]]:
     return tokens
 
 
+def cancel_cefr_fetch(scope: str) -> None:
+    cancel_active_cli(scope)
+
+
 def fetch_indexed_paragraph_tokens(paragraphs: list[dict[str, object]]) -> list[dict[str, object]]:
     total_words = sum(count_words(str(paragraph["text"])) for paragraph in paragraphs)
     if total_words > MAX_CEFR_WORDS:
@@ -63,20 +67,20 @@ def fetch_indexed_paragraph_tokens(paragraphs: list[dict[str, object]]) -> list[
     ]
 
 
-def fetch_paragraph_tokens_tolerant(paragraphs: list[str]) -> list[list[dict[str, str]]]:
+def fetch_paragraph_tokens_tolerant(paragraphs: list[str], scope: str | None = None) -> list[list[dict[str, str]]]:
     if not paragraphs:
         return []
     if not can_fetch_cefr():
         raise RuntimeError("playwright-cli is not available for Oxford CEFR checks.")
 
     joined = "\n\n".join(paragraphs)
-    tokens = fetch_tokens(joined)
+    tokens = fetch_tokens(joined, scope=scope)
     if "".join(token["text"] for token in tokens) == joined:
         return _split_tokens_by_paragraph(tokens, paragraphs)
     return _split_tokens_by_paragraph(_align_tokens_to_source(joined, tokens), paragraphs)
 
 
-def fetch_paragraph_tokens(paragraphs: list[str]) -> list[list[dict[str, str]]]:
+def fetch_paragraph_tokens(paragraphs: list[str], scope: str | None = None) -> list[list[dict[str, str]]]:
     if not paragraphs:
         return []
     if not can_fetch_cefr():
@@ -85,12 +89,11 @@ def fetch_paragraph_tokens(paragraphs: list[str]) -> list[list[dict[str, str]]]:
     all_tokens: list[list[dict[str, str]]] = []
     for chunk in _paragraph_chunks(paragraphs):
         joined = "\n\n".join(chunk)
-        tokens = fetch_tokens(joined)
+        tokens = fetch_tokens(joined, scope=scope)
         if "".join(token["text"] for token in tokens) == joined:
             all_tokens.extend(_split_tokens_by_paragraph(tokens, chunk))
             continue
-        # ponytail: fallback to per-paragraph fetch when Oxford normalizes chunk separators.
-        all_tokens.extend(_fetch_paragraphs_individually(chunk))
+        all_tokens.extend(_split_tokens_by_paragraph(_align_tokens_to_source(joined, tokens), chunk))
     return all_tokens
 
 

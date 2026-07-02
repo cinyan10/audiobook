@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
+import threading
 import uuid
 from html import escape
 from pathlib import Path
 
 
 CHECKER_URL = "https://www.oxfordlearnersdictionaries.com/text-checker/"
+CLI_TIMEOUT_SECONDS = 20
+_ACTIVE_PROCESS_LOCK = threading.Lock()
+_ACTIVE_PROCESSES: dict[str, list[subprocess.Popen[str]]] = {}
 LEVEL_COLORS = {
     "A1": "#0069b4",
     "A2": "#c91352",
@@ -40,15 +46,53 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_cli(session: str, *args: str, raw: bool = False) -> str:
+def kill_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def cancel_active_cli(scope: str) -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        processes = list(_ACTIVE_PROCESSES.get(scope, []))
+    for process in processes:
+        kill_process_group(process)
+
+
+def run_cli(session: str, *args: str, raw: bool = False, scope: str | None = None) -> str:
     cmd = ["playwright-cli", f"-s={session}"]
     if raw:
         cmd.append("--raw")
     cmd.extend(args)
-    result = subprocess.run(cmd, text=True, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "playwright-cli failed")
-    return result.stdout
+    process = subprocess.Popen(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    if scope:
+        with _ACTIVE_PROCESS_LOCK:
+            _ACTIVE_PROCESSES.setdefault(scope, []).append(process)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=CLI_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            kill_process_group(process)
+            process.communicate()
+            raise RuntimeError(f"playwright-cli timed out after {CLI_TIMEOUT_SECONDS}s") from exc
+    finally:
+        if scope:
+            with _ACTIVE_PROCESS_LOCK:
+                processes = _ACTIVE_PROCESSES.get(scope, [])
+                if process in processes:
+                    processes.remove(process)
+                if not processes:
+                    _ACTIVE_PROCESSES.pop(scope, None)
+    if process.returncode:
+        raise RuntimeError(stderr.strip() or stdout.strip() or "playwright-cli failed")
+    return stdout
 
 
 def input_text(args: argparse.Namespace) -> str:
@@ -59,7 +103,7 @@ def input_text(args: argparse.Namespace) -> str:
     raise RuntimeError("Provide an input file or --text.")
 
 
-def fetch_tokens(text: str) -> list[dict[str, str]]:
+def fetch_tokens(text: str, scope: str | None = None) -> list[dict[str, str]]:
     session = f"oxford-{uuid.uuid4().hex[:8]}"
     script = f"""
 async page => {{
@@ -91,9 +135,9 @@ JSON.stringify(
 )
 """
     try:
-        run_cli(session, "open", CHECKER_URL)
-        run_cli(session, "run-code", script)
-        raw = run_cli(session, "eval", extract, raw=True)
+        run_cli(session, "open", CHECKER_URL, scope=scope)
+        run_cli(session, "run-code", script, scope=scope)
+        raw = run_cli(session, "eval", extract, raw=True, scope=scope)
         parsed = json.loads(raw)
         return json.loads(parsed) if isinstance(parsed, str) else parsed
     finally:

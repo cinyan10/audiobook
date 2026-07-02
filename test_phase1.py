@@ -8,7 +8,7 @@ from zipfile import ZipFile
 
 from app.db import connect, init_db
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, save_progress, scan_books_directory
+from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -127,25 +127,20 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(get_cefr_job_status(connection)["ready_parts"], 1)
             connection.close()
 
-    def test_fetch_paragraph_tokens_falls_back_to_per_paragraph(self) -> None:
+    def test_fetch_paragraph_tokens_aligns_normalized_oxford_output(self) -> None:
         calls: list[str] = []
 
-        def fake_fetch_tokens(text: str) -> list[dict[str, str]]:
+        def fake_fetch_tokens(text: str, scope: str | None = None) -> list[dict[str, str]]:
             calls.append(text)
-            if text == "First paragraph.\n\nSecond paragraph.":
-                return [
-                    {"text": "First", "level": "A1", "tip": "n=A1"},
-                    {"text": " ", "level": "", "tip": ""},
-                    {"text": "paragraph", "level": "A2", "tip": "n=A2"},
-                    {"text": ".", "level": "", "tip": ""},
-                    {"text": " ", "level": "", "tip": ""},
-                    {"text": "Second", "level": "A1", "tip": "n=A1"},
-                    {"text": " ", "level": "", "tip": ""},
-                    {"text": "paragraph", "level": "A2", "tip": "n=A2"},
-                    {"text": ".", "level": "", "tip": ""},
-                ]
             return [
-                {"text": text[:-1], "level": "A1", "tip": "n=A1"},
+                {"text": "First", "level": "A1", "tip": "n=A1"},
+                {"text": " ", "level": "", "tip": ""},
+                {"text": "paragraph", "level": "A2", "tip": "n=A2"},
+                {"text": ".", "level": "", "tip": ""},
+                {"text": " ", "level": "", "tip": ""},
+                {"text": "Second", "level": "A1", "tip": "n=A1"},
+                {"text": " ", "level": "", "tip": ""},
+                {"text": "paragraph", "level": "A2", "tip": "n=A2"},
                 {"text": ".", "level": "", "tip": ""},
             ]
 
@@ -155,7 +150,7 @@ class Phase1ImportTests(unittest.TestCase):
         self.assertEqual(len(grouped), 2)
         self.assertEqual("".join(token["text"] for token in grouped[0]), "First paragraph.")
         self.assertEqual("".join(token["text"] for token in grouped[1]), "Second paragraph.")
-        self.assertEqual(calls[0], "First paragraph.\n\nSecond paragraph.")
+        self.assertEqual(calls, ["First paragraph.\n\nSecond paragraph."])
 
     def test_fetch_indexed_paragraph_tokens_is_stateless(self) -> None:
         mocked_tokens = [[{"text": "Simple", "level": "A1", "tip": "adj=A1"}]]
@@ -169,7 +164,7 @@ class Phase1ImportTests(unittest.TestCase):
     def test_fetch_indexed_paragraph_tokens_checks_once_for_live_payload(self) -> None:
         calls: list[str] = []
 
-        def fake_fetch_tokens(text: str) -> list[dict[str, str]]:
+        def fake_fetch_tokens(text: str, scope: str | None = None) -> list[dict[str, str]]:
             calls.append(text)
             return [
                 {"text": "First", "level": "A1", "tip": "n=A1"},
@@ -193,6 +188,54 @@ class Phase1ImportTests(unittest.TestCase):
 
         self.assertEqual(calls, ["First paragraph.\n\nSecond paragraph."])
         self.assertEqual(len(grouped), 2)
+
+    def test_book_scoped_cefr_job_uses_only_that_book(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            first_epub = books_dir / "first-book.epub"
+            second_epub = books_dir / "second-book.epub"
+            self._write_epub(first_epub)
+            self._write_epub(second_epub)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            first, _ = import_book(connection, first_epub)
+            second, _ = import_book(connection, second_epub)
+            job = start_cefr_job(connection, int(second["id"]))
+            target = next_pending_cefr_part(connection, int(second["id"]))
+
+            self.assertEqual(job["status"], "running")
+            self.assertIsNotNone(target)
+            assert target is not None
+            self.assertEqual(target[0], int(second["id"]))
+            self.assertNotEqual(target[0], int(first["id"]))
+            self.assertEqual(target[2], "Test Book · Chapter1")
+            connection.close()
+
+    def test_running_cefr_job_is_recovered_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, _ = import_book(connection, epub_path)
+            start_cefr_job(connection, int(summary["id"]))
+            recover_interrupted_cefr_jobs(connection)
+            status = get_cefr_job_status(connection)
+
+            self.assertEqual(status["status"], "interrupted")
+            self.assertNotEqual(next_pending_cefr_part(connection, int(summary["id"])), None)
+            connection.close()
 
     def test_ornament_divider_is_not_rendered_as_image_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -290,6 +333,36 @@ class Phase1ImportTests(unittest.TestCase):
             assert chapter is not None
             self.assertEqual([block["kind"] for block in chapter["blocks"]], ["paragraph"])
             self.assertEqual(chapter["blocks"][0]["paragraph"]["text"], "Chapter line.")
+            connection.close()
+
+    def test_cefr_enrichment_skips_hidden_title_paragraphs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, REDUNDANT_TITLE_CHAPTER_HTML)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+
+            summary, _ = import_book(connection, epub_path)
+            mocked_tokens = [
+                [
+                    {"text": "Chapter", "level": "A2", "tip": "n=A2"},
+                    {"text": " ", "level": "", "tip": ""},
+                    {"text": "line", "level": "A1", "tip": "n=A1"},
+                    {"text": ".", "level": "", "tip": ""},
+                ]
+            ]
+            with patch("app.library.fetch_paragraph_tokens", return_value=mocked_tokens) as fetch:
+                part_payload = enrich_book_part_cefr(connection, int(summary["id"]), 0)
+
+            fetch.assert_called_once_with(["Chapter line."], scope=None)
+            self.assertEqual(part_payload["status"], "ready")
+            self.assertEqual(part_payload["paragraphs"][0]["text"], "Chapter line.")
+            self.assertEqual(part_payload["paragraphs"][0]["tokens"][0]["cefr_level"], "A2")
             connection.close()
 
     def test_chapter_heading_paragraphs_to_skip(self) -> None:

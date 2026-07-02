@@ -24,6 +24,7 @@ class BookSummary(BaseModel):
     cefr_status: str
     cefr_ready_parts: int
     cefr_total_parts: int
+    cefr_percent: float
     progress_percent: float
     progress_label: str
     last_read_at: str | None = None
