@@ -540,6 +540,7 @@ function ReaderPage({
   const [alignmentTokens, setAlignmentTokens] = useState<TimedTokenRecord[]>([]);
   const [activeTokenIndex, setActiveTokenIndex] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pronunciationAudioRef = useRef<HTMLAudioElement | null>(null);
   const chapterParagraphsRef = useRef<ParagraphRecord[]>([]);
   const paragraphRefs = useRef<Array<HTMLElement | null>>([]);
   const tokenRefs = useRef<Record<number, HTMLElement | null>>({});
@@ -550,6 +551,8 @@ function ReaderPage({
   const lastLoadedAudioKeyRef = useRef<string>("");
   const lastScrollTargetRef = useRef<string>("");
   const lastAutoScrollTokenRef = useRef<number | null>(null);
+  const lastSelectionSeekKeyRef = useRef<string>("");
+  const pronunciationEndTimeRef = useRef<number | null>(null);
   const suppressScrollProgressUntilRef = useRef<number>(0);
   const requestedCefrRef = useRef<Set<string>>(new Set());
   const completedCefrRef = useRef<Set<string>>(new Set());
@@ -594,6 +597,7 @@ function ReaderPage({
 
   useEffect(() => {
     tokenRefs.current = {};
+    lastSelectionSeekKeyRef.current = "";
   }, [scrollTargetKey]);
 
   useEffect(() => {
@@ -626,6 +630,53 @@ function ReaderPage({
       audioTimeSeconds: roundedTime,
     });
     setBook((current) => (current && current.id === context.bookId ? { ...current, progress } : current));
+  };
+
+  const seekToToken = (token: TokenRecord) => {
+    const audio = audioRef.current;
+    if (!audio || !currentAudioSrc) {
+      return;
+    }
+    const window = estimateTokenWindow(token.token_index, currentParagraphs, alignmentTokens, audio);
+    if (!window) {
+      return;
+    }
+    if (audio.paused) {
+      playPronunciation(currentAudioSrc, window);
+    }
+    audio.currentTime = window.start;
+    setAudioState((current) => ({ ...current, currentTime: window.start }));
+  };
+
+  const playPronunciation = (src: string, window: { start: number; end: number }) => {
+    const audio = pronunciationAudioRef.current;
+    if (!audio) {
+      return;
+    }
+    audio.pause();
+    audio.src = src;
+    pronunciationEndTimeRef.current = window.end;
+    audio.currentTime = window.start;
+    void audio.play();
+  };
+
+  const toggleAudioPlayback = () => {
+    const audio = audioRef.current;
+    if (!audio || !currentAudioSrc) {
+      return;
+    }
+    if (audio.paused) {
+      stopPronunciation();
+      void audio.play();
+    } else {
+      audio.pause();
+    }
+  };
+
+  const stopPronunciation = () => {
+    const audio = pronunciationAudioRef.current;
+    pronunciationEndTimeRef.current = null;
+    audio?.pause();
   };
 
   useEffect(() => {
@@ -688,6 +739,24 @@ function ReaderPage({
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("seeked", onSeeked);
       audio.removeEventListener("ended", onEnded);
+    };
+  }, []);
+
+  useEffect(() => {
+    const audio = pronunciationAudioRef.current;
+    if (!audio) {
+      return;
+    }
+    const stopAtEnd = () => {
+      if (pronunciationEndTimeRef.current !== null && audio.currentTime >= pronunciationEndTimeRef.current) {
+        stopPronunciation();
+      }
+    };
+    audio.addEventListener("timeupdate", stopAtEnd);
+    audio.addEventListener("ended", stopPronunciation);
+    return () => {
+      audio.removeEventListener("timeupdate", stopAtEnd);
+      audio.removeEventListener("ended", stopPronunciation);
     };
   }, []);
 
@@ -811,6 +880,7 @@ function ReaderPage({
       return;
     }
     if (!currentAudioSrc || !book || !currentPart) {
+      stopPronunciation();
       audio.pause();
       audio.removeAttribute("src");
       audio.load();
@@ -899,9 +969,9 @@ function ReaderPage({
       setActiveTokenIndex(null);
       return;
     }
-    const activeToken = alignmentTokens.find(
-      (token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time,
-    );
+    const activeToken =
+      alignmentTokens.find((token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time) ??
+      [...alignmentTokens].reverse().find((token) => token.start_time <= audioState.currentTime);
     setActiveTokenIndex((current) => (current === (activeToken?.token_index ?? null) ? current : activeToken?.token_index ?? null));
     if (!activeToken || lastAutoScrollTokenRef.current === activeToken.token_index) {
       return;
@@ -1055,6 +1125,45 @@ function ReaderPage({
       return;
     }
 
+    const seekSelectedWord = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
+        lastSelectionSeekKeyRef.current = "";
+        return;
+      }
+      const text = selection.toString().trim();
+      if (!text || /\s/.test(text)) {
+        lastSelectionSeekKeyRef.current = "";
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      const token = currentParagraphs.flatMap((paragraph) => paragraph.tokens).find((candidate) => {
+        const element = tokenRefs.current[candidate.token_index];
+        return element ? range.intersectsNode(element) && element.textContent?.trim() === text : false;
+      });
+      if (token) {
+        const seekKey = `${token.token_index}:${text}`;
+        if (lastSelectionSeekKeyRef.current === seekKey) {
+          return;
+        }
+        lastSelectionSeekKeyRef.current = seekKey;
+        seekToToken(token);
+      }
+    };
+
+    document.addEventListener("mouseup", seekSelectedWord);
+    document.addEventListener("keyup", seekSelectedWord);
+    return () => {
+      document.removeEventListener("mouseup", seekSelectedWord);
+      document.removeEventListener("keyup", seekSelectedWord);
+    };
+  }, [alignmentTokens, book, currentAudioSrc, currentParagraphs]);
+
+  useEffect(() => {
+    if (!book || !currentParagraphs.length) {
+      return;
+    }
+
     const detectParagraph = () => {
       const audio = audioRef.current;
       if (currentAlignmentSrc && activeTokenIndex !== null && audio && audio.currentTime > 0) {
@@ -1123,6 +1232,11 @@ function ReaderPage({
         setSidebarOpen((current) => !current);
         return;
       }
+      if (key === " " && currentAudioSrc) {
+        event.preventDefault();
+        toggleAudioPlayback();
+        return;
+      }
       if (!["w", "a", "s", "d"].includes(key)) {
         return;
       }
@@ -1152,7 +1266,7 @@ function ReaderPage({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [book, dialogImage, selectedChapterIndex, selectedPartIndex]);
+  }, [book, currentAudioSrc, dialogImage, selectedChapterIndex, selectedPartIndex]);
 
   const progressLabel = book ? `${book.progress.percent.toFixed(1)}%` : "0.0%";
 
@@ -1168,21 +1282,14 @@ function ReaderPage({
               currentTime: audioState.currentTime,
               duration: audioState.duration,
               onTogglePlay: () => {
-                const audio = audioRef.current;
-                if (!audio) {
-                  return;
-                }
-                if (audio.paused) {
-                  void audio.play();
-                } else {
-                  audio.pause();
-                }
+                toggleAudioPlayback();
               },
               onSeek: (time) => {
                 const audio = audioRef.current;
                 if (!audio) {
                   return;
                 }
+                stopPronunciation();
                 audio.currentTime = Math.max(0, Math.min(time, Number.isFinite(audio.duration) ? audio.duration : time));
                 setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
               },
@@ -1195,6 +1302,7 @@ function ReaderPage({
                   0,
                   Math.min(audio.currentTime + deltaSeconds, Number.isFinite(audio.duration) ? audio.duration : audio.currentTime + deltaSeconds),
                 );
+                stopPronunciation();
                 audio.currentTime = nextTime;
                 setAudioState((current) => ({ ...current, currentTime: nextTime }));
               },
@@ -1219,6 +1327,7 @@ function ReaderPage({
   return (
     <main className="reader-shell">
       <audio ref={audioRef} preload="metadata" className="visually-hidden" />
+      <audio ref={pronunciationAudioRef} preload="metadata" className="visually-hidden" />
       {error ? <p className="error-banner">{error}</p> : null}
 
       {!loading && book ? (
@@ -1332,6 +1441,7 @@ function ReaderPage({
                         }}
                         className={readerTokenClassName(token, token.token_index === activeTokenIndex)}
                         title={token.oxford_tip || ""}
+                        onClick={() => seekToToken(token)}
                       >
                         {token.text}
                       </span>
@@ -1476,6 +1586,65 @@ function readerTokenClassName(token: TokenRecord, active: boolean): string {
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function estimateTokenWindow(
+  tokenIndex: number,
+  paragraphs: ParagraphRecord[],
+  alignmentTokens: TimedTokenRecord[],
+  audio: HTMLAudioElement,
+): { start: number; end: number } | null {
+  const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+  const timed = alignmentTokens.find((token) => token.token_index === tokenIndex);
+  if (timed) {
+    return {
+      start: clampAudioTime(timed.start_time, duration),
+      end: clampAudioTime(timed.end_time, duration),
+    };
+  }
+
+  const sorted = [...alignmentTokens].sort((left, right) => left.token_index - right.token_index);
+  let previous: TimedTokenRecord | null = null;
+  for (const token of sorted) {
+    if (token.token_index >= tokenIndex) {
+      break;
+    }
+    previous = token;
+  }
+  const next = sorted.find((token) => token.token_index > tokenIndex) ?? null;
+  let start: number | null = null;
+  if (previous && next) {
+    const ratio = (tokenIndex - previous.token_index) / (next.token_index - previous.token_index);
+    start = previous.start_time + ratio * (next.start_time - previous.start_time);
+  }
+
+  const visibleTokenIndexes = paragraphs.flatMap((paragraph) => paragraph.tokens.map((token) => token.token_index));
+  const firstTokenIndex = visibleTokenIndexes[0] ?? 0;
+  const lastTokenIndex = visibleTokenIndexes[visibleTokenIndexes.length - 1] ?? firstTokenIndex;
+  const secondsPerToken = duration > 0 && lastTokenIndex > firstTokenIndex ? duration / (lastTokenIndex - firstTokenIndex) : 0;
+  if (start === null && previous && secondsPerToken) {
+    start = previous.start_time + (tokenIndex - previous.token_index) * secondsPerToken;
+  }
+  if (start === null && next && secondsPerToken) {
+    start = next.start_time - (next.token_index - tokenIndex) * secondsPerToken;
+  }
+
+  const visibleIndex = visibleTokenIndexes.indexOf(tokenIndex);
+  if (start === null && duration > 0 && visibleIndex >= 0 && visibleTokenIndexes.length > 1) {
+    start = (visibleIndex / (visibleTokenIndexes.length - 1)) * duration;
+  }
+  if (start === null) {
+    return null;
+  }
+  const clampedStart = clampAudioTime(start, duration);
+  return {
+    start: clampedStart,
+    end: clampAudioTime(clampedStart + Math.min(Math.max(secondsPerToken || 0.45, 0.25), 0.9), duration),
+  };
+}
+
+function clampAudioTime(time: number, duration: number): number {
+  return Math.max(0, Math.min(time, duration > 0 ? duration : time));
 }
 
 function findAdjacentPart(
