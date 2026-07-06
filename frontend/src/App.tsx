@@ -549,7 +549,10 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
   } | null>(null);
 
   const currentChapter = book?.chapters[selectedChapterIndex] ?? null;
-  const currentPart = selectedPartIndex !== null && currentChapter?.parts[selectedPartIndex] ? currentChapter.parts[selectedPartIndex] : null;
+  const currentPart =
+    selectedPartIndex !== null && currentChapter
+      ? currentChapter.parts.find((part) => part.part_index === selectedPartIndex) ?? null
+      : null;
   const currentBlocks = chapterCache[selectedChapterIndex] ?? [];
   const visibleBlocks =
     currentPart

@@ -223,11 +223,7 @@ def synthesize_openai_chunk(api_key: str, model: str, voice: str, text: str, ret
         {
             "model": model,
             "voice": voice,
-            "input": (
-                "Read this excerpt naturally as an audiobook narrator. "
-                "Keep the wording exactly as written.\n\n"
-                f"{text}"
-            ),
+            "input": text,
             "response_format": "wav",
         }
     ).encode("utf-8")
@@ -471,11 +467,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def openai_cost_note(text: str) -> str:
-    prompt = (
-        "Read this excerpt naturally as an audiobook narrator. "
-        "Keep the wording exactly as written.\n\n"
-    )
-    input_tokens = math.ceil((len(prompt) + len(text)) / 4)
+    input_tokens = math.ceil(len(text) / 4)
     return (
         "estimated OpenAI TTS input size: "
         f"~{input_tokens:,} text tokens "
