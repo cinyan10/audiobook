@@ -132,7 +132,9 @@ type CEFRJobSummary = {
   error_message: string | null;
 };
 
-type ViewState = { kind: "library" } | { kind: "reader"; bookId: number };
+type ViewState =
+  | { kind: "library" }
+  | { kind: "reader"; bookId: number; chapterIndex: number | null; partIndex: number | null };
 type NavbarAudioState = {
   playing: boolean;
   currentTime: number;
@@ -238,7 +240,12 @@ function App() {
           refreshSignal={libraryRefreshSignal}
         />
       ) : (
-        <ReaderPage bookId={view.bookId} onNavbarChange={setNavbar} />
+        <ReaderPage
+          bookId={view.bookId}
+          routeChapterIndex={view.chapterIndex}
+          routePartIndex={view.partIndex}
+          onNavbarChange={setNavbar}
+        />
       )}
     </div>
   );
@@ -507,7 +514,17 @@ function LibraryPage({
   );
 }
 
-function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange: (state: NavbarState) => void }) {
+function ReaderPage({
+  bookId,
+  routeChapterIndex,
+  routePartIndex,
+  onNavbarChange,
+}: {
+  bookId: number;
+  routeChapterIndex: number | null;
+  routePartIndex: number | null;
+  onNavbarChange: (state: NavbarState) => void;
+}) {
   const [book, setBook] = useState<ReaderPayload | null>(null);
   const [chapterCache, setChapterCache] = useState<Record<number, ChapterBlock[]>>({});
   const [selectedChapterIndex, setSelectedChapterIndex] = useState<number>(0);
@@ -709,12 +726,13 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
         if (!active) {
           return;
         }
-        const initialChapterIndex = findChapterIndex(nextBook.chapters, nextBook.progress.last_paragraph_index);
+        const routeTarget = findRoutePart(nextBook.chapters, routeChapterIndex, routePartIndex);
+        const initialChapterIndex = routeTarget?.chapterIndex ?? findChapterIndex(nextBook.chapters, nextBook.progress.last_paragraph_index);
         const initialChapter = nextBook.chapters[initialChapterIndex] ?? null;
-        shouldRestoreScrollRef.current = true;
+        shouldRestoreScrollRef.current = !routeTarget;
         lastSavedRef.current = nextBook.progress.last_paragraph_index;
         setSelectedChapterIndex(initialChapterIndex);
-        setSelectedPartIndex(initialChapter ? findPartIndex(initialChapter.parts, nextBook.progress.last_paragraph_index) : null);
+        setSelectedPartIndex(routeTarget?.partIndex ?? (initialChapter ? findPartIndex(initialChapter.parts, nextBook.progress.last_paragraph_index) : null));
         setBook(nextBook);
       } catch (loadError) {
         if (active) {
@@ -731,6 +749,29 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
       active = false;
     };
   }, [bookId]);
+
+  useEffect(() => {
+    if (!book) {
+      return;
+    }
+    const routeTarget = findRoutePart(book.chapters, routeChapterIndex, routePartIndex);
+    if (!routeTarget && (routeChapterIndex === null || routePartIndex === null)) {
+      return;
+    }
+    const progressChapterIndex = findChapterIndex(book.chapters, book.progress.last_paragraph_index);
+    const progressChapter = book.chapters[progressChapterIndex] ?? null;
+    const target = routeTarget ?? {
+      chapterIndex: progressChapterIndex,
+      partIndex: progressChapter ? findPartIndex(progressChapter.parts, book.progress.last_paragraph_index) : null,
+    };
+    if (target.chapterIndex === selectedChapterIndex && target.partIndex === selectedPartIndex) {
+      return;
+    }
+    shouldRestoreScrollRef.current = !routeTarget;
+    void persistAudioProgress(true);
+    setSelectedChapterIndex(target.chapterIndex);
+    setSelectedPartIndex(target.partIndex);
+  }, [book, routeChapterIndex, routePartIndex, selectedChapterIndex, selectedPartIndex]);
 
   useEffect(() => {
     if (!book || chapterCache[selectedChapterIndex]) {
@@ -1106,8 +1147,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
 
       shouldRestoreScrollRef.current = false;
       void persistAudioProgress(true);
-      setSelectedChapterIndex(nextPartTarget.chapterIndex);
-      setSelectedPartIndex(nextPartTarget.partIndex);
+      navigateToBookPart(book.id, nextPartTarget.chapterIndex, nextPartTarget.partIndex);
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -1201,8 +1241,12 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
                     onClick={() => {
                       shouldRestoreScrollRef.current = false;
                       void persistAudioProgress(true);
-                      setSelectedChapterIndex(chapter.chapter_index);
-                      setSelectedPartIndex(chapter.parts.length ? chapter.parts[0].part_index : null);
+                      if (chapter.parts.length) {
+                        navigateToBookPart(book.id, chapter.chapter_index, chapter.parts[0].part_index);
+                      } else {
+                        setSelectedChapterIndex(chapter.chapter_index);
+                        setSelectedPartIndex(null);
+                      }
                       if (isSidebarFloating) {
                         setSidebarOpen(false);
                       }
@@ -1221,8 +1265,7 @@ function ReaderPage({ bookId, onNavbarChange }: { bookId: number; onNavbarChange
                           onClick={() => {
                             shouldRestoreScrollRef.current = false;
                             void persistAudioProgress(true);
-                            setSelectedChapterIndex(chapter.chapter_index);
-                            setSelectedPartIndex(part.part_index);
+                            navigateToBookPart(book.id, chapter.chapter_index, part.part_index);
                             if (isSidebarFloating) {
                               setSidebarOpen(false);
                             }
@@ -1369,6 +1412,19 @@ function findPartIndex(parts: ChapterPartRecord[], paragraphIndex: number): numb
   return part ? part.part_index : null;
 }
 
+function findRoutePart(
+  chapters: ChapterRecord[],
+  chapterIndex: number | null,
+  partIndex: number | null,
+): { chapterIndex: number; partIndex: number } | null {
+  if (chapterIndex === null || partIndex === null) {
+    return null;
+  }
+  const chapter = chapters.find((item) => item.chapter_index === chapterIndex);
+  const part = chapter?.parts.find((item) => item.part_index === partIndex);
+  return chapter && part ? { chapterIndex, partIndex } : null;
+}
+
 function filterBlocksForPart(blocks: ChapterBlock[], part: ChapterPartRecord): ChapterBlock[] {
   const visible: ChapterBlock[] = [];
   const pendingImages: ChapterBlock[] = [];
@@ -1465,12 +1521,21 @@ function migrateHashRoute() {
 
 function readLocation(): ViewState {
   const pathname = window.location.pathname;
+  const partMatch = pathname.match(/^\/books\/(\d+)\/chapters\/(\d+)\/parts\/(\d+)\/?$/);
+  if (partMatch) {
+    return {
+      kind: "reader",
+      bookId: Number(partMatch[1]),
+      chapterIndex: Number(partMatch[2]),
+      partIndex: Number(partMatch[3]),
+    };
+  }
   const match = pathname.match(/^\/books\/(\d+)\/?$/);
   if (match) {
-    return { kind: "reader", bookId: Number(match[1]) };
+    return { kind: "reader", bookId: Number(match[1]), chapterIndex: null, partIndex: null };
   }
   const hashMatch = window.location.hash.match(/^#\/books\/(\d+)$/);
-  return hashMatch ? { kind: "reader", bookId: Number(hashMatch[1]) } : { kind: "library" };
+  return hashMatch ? { kind: "reader", bookId: Number(hashMatch[1]), chapterIndex: null, partIndex: null } : { kind: "library" };
 }
 
 function navigateToBook(bookId: number) {
@@ -1480,6 +1545,11 @@ function navigateToBook(bookId: number) {
 
 function navigateToLibrary() {
   window.history.pushState({}, "", "/");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function navigateToBookPart(bookId: number, chapterIndex: number, partIndex: number, replace = false) {
+  window.history[replace ? "replaceState" : "pushState"]({}, "", `/books/${bookId}/chapters/${chapterIndex}/parts/${partIndex}`);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
