@@ -5,8 +5,8 @@ This repository is a small Python-first prototype for audiobook generation and r
 
 - `gemini_audiobook.py`: EPUB text extraction, chunking, and Gemini TTS audio generation.
 - `oxford_cefr.py`: Oxford Text Checker scraping via `playwright-cli`, plus HTML/JSON CEFR output.
-- `books/`: source `.epub` files.
-- `audio/`: generated audiobook assets and chunked WAV files.
+- `data/books/`: local source `.epub` files, ignored by Git.
+- `data/audio/`: local generated audiobook assets and chunked WAV files, ignored by Git.
 - `sample-cefr-reader.html` and `sample-cefr-reader.json`: example output artifacts.
 - `PRD-web-book-reader.md` and `tech-stack.md`: product and architecture notes.
 
@@ -52,7 +52,7 @@ Pull requests should include:
 
 - a brief summary of the user-visible or pipeline change
 - any new command needed to run or verify it
-- sample output paths when artifacts change, such as `audio/...` or `sample-cefr-reader.html`
+- sample output paths when artifacts change, such as `data/audio/...` or `sample-cefr-reader.html`
 
 ## Security & Configuration Tips
 Do not commit `.env`. Keep API keys local, and read them from environment variables. Generated audio can be large, so avoid committing temporary artifacts unless they are intentional fixtures or examples.

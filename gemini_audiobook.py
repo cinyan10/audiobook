@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import math
 import os
 import posixpath
@@ -8,19 +9,28 @@ import re
 import struct
 import sys
 import time
+import urllib.error
+import urllib.request
 import wave
 from html import unescape
 from html.parser import HTMLParser
+from json import dumps
 from pathlib import Path
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 
 MODEL = "gemini-3.1-flash-tts-preview"
 VOICE = "charon"
+OPENAI_MODEL = "gpt-4o-mini-tts"
+OPENAI_VOICE = "cedar"
 MAX_CHARS = 8000
 MAX_SILENCE_SECONDS = 1.2
 KEEP_SILENCE_SECONDS = 0.6
@@ -30,6 +40,17 @@ START_TEXT = (
     "trying to give him orders, but he and Totsuka appeared satisfied at having "
     "been able to eat delicious ramen."
 )
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
 class EpubTextParser(HTMLParser):
@@ -155,7 +176,10 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
     return chunks
 
 
-def synthesize_chunk(client: genai.Client, model: str, text: str, retries: int = 6) -> tuple[str, bytes]:
+def synthesize_gemini_chunk(client, model: str, voice: str, text: str, retries: int = 6) -> tuple[str, bytes]:
+    if types is None:
+        raise RuntimeError("google-genai is not installed.")
+
     for attempt in range(retries):
         try:
             response = client.models.generate_content(
@@ -167,7 +191,7 @@ def synthesize_chunk(client: genai.Client, model: str, text: str, retries: int =
                 ),
                 config=types.GenerateContentConfig(
                     response_modalities=["audio"],
-                    speech_config=VOICE,
+                    speech_config=voice,
                 ),
             )
             break
@@ -194,9 +218,62 @@ def synthesize_chunk(client: genai.Client, model: str, text: str, retries: int =
     return audio_parts[0][0], b"".join(data for _, data in audio_parts)
 
 
+def synthesize_openai_chunk(api_key: str, model: str, voice: str, text: str, retries: int = 6) -> tuple[str, bytes]:
+    payload = dumps(
+        {
+            "model": model,
+            "voice": voice,
+            "input": (
+                "Read this excerpt naturally as an audiobook narrator. "
+                "Keep the wording exactly as written.\n\n"
+                f"{text}"
+            ),
+            "response_format": "wav",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/audio/speech",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    for attempt in range(retries):
+        retry_error: Exception | None = None
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return wav_bytes_to_pcm(response.read())
+        except urllib.error.HTTPError as error:
+            retry_error = error
+            detail = error.read().decode("utf-8", "ignore")
+            if attempt == retries - 1 or error.code not in {408, 409, 429, 500, 502, 503, 504}:
+                raise RuntimeError(f"OpenAI TTS failed: HTTP {error.code} {detail}") from error
+        except urllib.error.URLError as error:
+            retry_error = error
+            if attempt == retries - 1:
+                raise RuntimeError(f"OpenAI TTS failed: {error}") from error
+
+        wait = retry_wait(retry_error or Exception(), attempt)
+        print(f"  retrying in {wait}s", file=sys.stderr)
+        time.sleep(wait)
+
+    raise RuntimeError("OpenAI TTS failed.")
+
+
+def synthesize_chunk(provider: str, client, model: str, voice: str, text: str, retries: int = 6) -> tuple[str, bytes]:
+    if provider == "openai":
+        return synthesize_openai_chunk(client, model, voice, text, retries=retries)
+    return synthesize_gemini_chunk(client, model, voice, text, retries=retries)
+
+
 def synthesize_file(
-    client: genai.Client,
+    provider: str,
+    client,
     model: str,
+    voice: str,
     text: str,
     output_path: Path,
     delay: float,
@@ -217,7 +294,7 @@ def synthesize_file(
 
         print(f"  chunk {index}/{len(chunks)}", file=sys.stderr)
         try:
-            audio_chunk = synthesize_chunk(client, model, chunk, retries=retries)
+            audio_chunk = synthesize_chunk(provider, client, model, voice, chunk, retries=retries)
         except Exception as error:
             print(f"  failed chunk {index}/{len(chunks)}: {error}", file=sys.stderr)
             return False
@@ -246,6 +323,12 @@ def parse_pcm_mime_type(mime_type: str) -> tuple[int, int, int]:
     channels = int(channels_match.group(1)) if channels_match else 1
     sample_width = 2
     return channels, sample_width, sample_rate
+
+
+def wav_bytes_to_pcm(wav_data: bytes) -> tuple[str, bytes]:
+    with wave.open(io.BytesIO(wav_data), "rb") as src:
+        mime_type = f"audio/L16;codec=pcm;rate={src.getframerate()};channels={src.getnchannels()}"
+        return mime_type, src.readframes(src.getnframes())
 
 
 def squash_silence(mime_type: str, frames: bytes) -> bytes:
@@ -299,6 +382,8 @@ def combine_pcm_chunks(audio_chunks: list[tuple[str, bytes]], output_path: Path)
 
 def write_wav(audio_chunk: tuple[str, bytes], output_path: Path) -> None:
     mime_type, frames = audio_chunk
+    if frames.startswith(b"RIFF"):
+        mime_type, frames = wav_bytes_to_pcm(frames)
     channels, sample_width, sample_rate = parse_pcm_mime_type(mime_type)
     with wave.open(str(output_path), "wb") as out:
         out.setnchannels(channels)
@@ -314,13 +399,13 @@ def read_wav(path: Path) -> tuple[str, bytes]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate an audiobook WAV with Gemini TTS.")
+    parser = argparse.ArgumentParser(description="Generate audiobook WAV files with TTS.")
     parser.add_argument("input", nargs="?", type=Path, help="Input text file")
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Output folder for parts, or a WAV path with --single-file. Defaults to audio/<book-name>.",
+        help="Output folder for parts, or a WAV path with --single-file. Defaults to data/audio/<book-name>.",
     )
     parser.add_argument(
         "--start",
@@ -330,7 +415,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=MODEL,
-        help="Gemini TTS model to use.",
+        help="TTS model to use.",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("gemini", "openai"),
+        default="gemini",
+        help="TTS provider to use.",
+    )
+    parser.add_argument(
+        "--voice",
+        default=None,
+        help="TTS voice to use. Defaults to charon for Gemini and cedar for OpenAI.",
     )
     parser.add_argument(
         "--single-file",
@@ -342,6 +438,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="Chapter number to use in generated audio filenames.",
+    )
+    parser.add_argument(
+        "--part",
+        type=int,
+        help="Only synthesize this ornament-separated part number.",
     )
     parser.add_argument(
         "--delay",
@@ -369,8 +470,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def openai_cost_note(text: str) -> str:
+    prompt = (
+        "Read this excerpt naturally as an audiobook narrator. "
+        "Keep the wording exactly as written.\n\n"
+    )
+    input_tokens = math.ceil((len(prompt) + len(text)) / 4)
+    return (
+        "estimated OpenAI TTS input size: "
+        f"~{input_tokens:,} text tokens "
+        "(check OpenAI usage for exact billed cost, including generated audio)"
+    )
+
+
 def main() -> int:
+    load_dotenv()
     args = parse_args()
+    voice = args.voice or (OPENAI_VOICE if args.provider == "openai" else VOICE)
+    model = args.model
+    if args.provider == "openai" and model == MODEL:
+        model = OPENAI_MODEL
 
     if args.self_check:
         sample = "intro\n\n" + START_TEXT + "\n\none\n\nX X X\n\ntwo " + ("x" * 5000)
@@ -382,6 +501,7 @@ def main() -> int:
         assert book_slug(Path("My Book, Volume 01 (Someone).epub")) == "my-book-vol-01"
         assert part_stem(4, 1) == "chapter-04-part-001"
         assert retry_wait(Exception("{'retryDelay': '56s'}"), 0) == 58
+        assert openai_cost_note("abcd").startswith("estimated OpenAI TTS input size")
         frames = b"\0\0" * 24000 * 3 + struct.pack("<24000h", *([2000] * 24000))
         assert len(squash_silence("audio/L16;codec=pcm;rate=24000", frames)) < len(frames)
         check_path = Path(os.environ.get("TMPDIR", "/tmp")) / "gemini-audiobook-self-check.wav"
@@ -395,36 +515,56 @@ def main() -> int:
         print("input is required unless --self-check is used.", file=sys.stderr)
         return 1
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("GEMINI_API_KEY or GOOGLE_API_KEY is not set.", file=sys.stderr)
-        return 1
+    if args.provider == "openai":
+        client = os.environ.get("OPENAI_API_KEY")
+        if not client:
+            print("OPENAI_API_KEY is not set.", file=sys.stderr)
+            return 1
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("GEMINI_API_KEY or GOOGLE_API_KEY is not set.", file=sys.stderr)
+            return 1
+        if genai is None:
+            print("google-genai is not installed.", file=sys.stderr)
+            return 1
+        client = genai.Client(api_key=api_key)
 
-    text = trim_to_start(input_text(args.input), args.start)
+    text = input_text(args.input)
+    if args.start:
+        text = trim_to_start(text, args.start)
     if not text:
         print(f"{args.input} is empty.", file=sys.stderr)
         return 1
 
-    client = genai.Client(api_key=api_key)
-    output = args.output or Path("audio") / book_slug(args.input)
+    output = args.output or Path("data") / "audio" / book_slug(args.input)
 
     if args.single_file:
+        if args.provider == "openai":
+            print(openai_cost_note(text), file=sys.stderr)
         print(f"Synthesizing {output}...", file=sys.stderr)
-        if not synthesize_file(client, args.model, text, output, args.delay, args.retries, args.max_chars):
+        if not synthesize_file(args.provider, client, model, voice, text, output, args.delay, args.retries, args.max_chars):
             return 1
         print(output)
         return 0
 
     parts = split_parts(text)
+    if args.part is not None:
+        if args.part < 1 or args.part > len(parts):
+            print(f"--part must be between 1 and {len(parts)}.", file=sys.stderr)
+            return 1
+        parts = [parts[args.part - 1]]
     failed = False
     output.mkdir(parents=True, exist_ok=True)
-    for index, part in enumerate(parts, start=1):
+    for index, part in enumerate(parts, start=args.part or 1):
         path = output / f"{part_stem(args.chapter, index)}.wav"
         if path.exists():
             print(f"Skipping existing {path}", file=sys.stderr)
             continue
+        if args.provider == "openai":
+            print(openai_cost_note(part), file=sys.stderr)
         print(f"Synthesizing part {index}/{len(parts)}: {path}", file=sys.stderr)
-        if not synthesize_file(client, args.model, part, path, args.delay, args.retries, args.max_chars):
+        if not synthesize_file(args.provider, client, model, voice, part, path, args.delay, args.retries, args.max_chars):
             failed = True
     print(output)
     return 1 if failed else 0

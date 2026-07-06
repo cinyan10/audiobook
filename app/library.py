@@ -13,7 +13,7 @@ from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugi
 
 
 CEFR_FETCH_LOCK = threading.Lock()
-AUDIO_DIR = Path("audio")
+AUDIO_DIR = Path("data") / "audio"
 
 
 def chapter_audio_number(chapter_title: str, chapter_index: int) -> int:

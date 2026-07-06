@@ -34,7 +34,7 @@ from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset
 from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
-BOOKS_DIR = Path("books")
+BOOKS_DIR = Path("data") / "books"
 FRONTEND_DIST = Path("frontend") / "dist"
 cefr_batch_runner = CEFRBatchRunner()
 
