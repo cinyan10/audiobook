@@ -301,7 +301,15 @@ async def cefr_events(websocket: WebSocket) -> None:
     try:
         await websocket.send_json(cefr_batch_runner.status())
         while True:
-            job = await events.get()
+            receive_task = asyncio.create_task(websocket.receive())
+            event_task = asyncio.create_task(events.get())
+            done, pending = await asyncio.wait({receive_task, event_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if receive_task in done:
+                break
+            job = event_task.result()
             await websocket.send_json(job)
     except WebSocketDisconnect:
         pass

@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -66,7 +67,7 @@ def prod_server_command(host: str, api_port: int) -> tuple[list[str], Path]:
 def port_processes(port: int) -> list[tuple[int, str]]:
     try:
         result = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpct"],
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"],
             capture_output=True,
             text=True,
             check=False,
@@ -83,10 +84,10 @@ def port_processes(port: int) -> list[tuple[int, str]]:
             pid = int(line[1:])
         elif line.startswith("c"):
             command = line[1:]
-        elif line.startswith("t") and line[1:] == "LISTEN" and pid is not None:
-            processes.append((pid, command or "unknown"))
-            pid = None
-            command = ""
+            if pid is not None:
+                processes.append((pid, command or "unknown"))
+                pid = None
+                command = ""
     return processes
 
 
@@ -131,8 +132,22 @@ def kill_processes(processes: Iterable[tuple[int, str]], port: int) -> bool:
     return True
 
 
-def ensure_port_available(port: int) -> bool:
-    return kill_processes(port_processes(port), port)
+def port_is_available(host: str, port: int) -> bool:
+    try:
+        with socket.create_server((host, port)):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_port_available(host: str, port: int) -> bool:
+    processes = port_processes(port)
+    if not processes and port_is_available(host, port):
+        return True
+    if not processes:
+        print(f"Port {port} is in use, but no listener process was found.")
+        return False
+    return kill_processes(processes, port) and not port_processes(port)
 
 
 def run_command(command: list[str], cwd: Path, dry_run: bool) -> int:
@@ -152,14 +167,18 @@ def run_dev(host: str, api_port: int, frontend_port: int, dry_run: bool) -> int:
             print(f"$ {' '.join(command)}")
         return 0
     for port in (api_port, frontend_port):
-        if not ensure_port_available(port):
+        if not ensure_port_available(host, port):
             return 1
 
     processes: list[subprocess.Popen[bytes]] = []
     try:
         for command, cwd in commands:
-            processes.append(subprocess.Popen(command, cwd=cwd))
+            process = subprocess.Popen(command, cwd=cwd)
+            processes.append(process)
             time.sleep(0.4)
+            code = process.poll()
+            if code is not None:
+                return code
         print(f"Frontend: http://{host}:{frontend_port}")
         print(f"Backend:  http://{host}:{api_port}")
         while True:
@@ -189,7 +208,7 @@ def stop_processes(processes: list[subprocess.Popen[bytes]]) -> None:
 
 
 def run_prod(host: str, api_port: int, dry_run: bool) -> int:
-    if not dry_run and not ensure_port_available(api_port):
+    if not dry_run and not ensure_port_available(host, api_port):
         return 1
     build_command, build_cwd = prod_build_command()
     build_code = run_command(build_command, build_cwd, dry_run)
@@ -200,6 +219,8 @@ def run_prod(host: str, api_port: int, dry_run: bool) -> int:
 
 
 def self_check() -> int:
+    from unittest.mock import patch
+
     os.environ.setdefault("PYTHONPATH", str(ROOT))
     dev = dev_commands("127.0.0.1", 8000, 5173)
     assert dev[0][0][-1] == "--reload" or "--reload" in dev[0][0]
@@ -208,6 +229,10 @@ def self_check() -> int:
     assert any(part == "build" for part in prod_build)
     prod_server, _ = prod_server_command("127.0.0.1", 8000)
     assert "uvicorn" in prod_server
+    with patch("socket.create_server") as create_server:
+        assert port_is_available("127.0.0.1", 8000)
+        create_server.side_effect = OSError()
+        assert not port_is_available("127.0.0.1", 8000)
     print("self-check passed")
     return 0
 
