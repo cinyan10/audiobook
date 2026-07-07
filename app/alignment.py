@@ -111,7 +111,7 @@ def generate_part_alignment(
         raise RuntimeError("Install faster-whisper before running alignment.") from exc
 
     source_tokens = get_part_word_tokens(connection, book_id, chapter_index, part_index)
-    model = WhisperModel(model_name, device="auto", compute_type="default")
+    model = WhisperModel(model_name, device="auto", compute_type="float32")
     segments, _ = model.transcribe(str(audio_path), language="en", word_timestamps=True)
     transcript_words: list[dict[str, float | str]] = []
     for segment in segments:
