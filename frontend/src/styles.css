@@ -76,6 +76,7 @@ code {
 
 .reader-shell {
   padding-top: 1rem;
+  padding-bottom: 8rem;
 }
 
 .visually-hidden {
@@ -312,20 +313,29 @@ code {
 }
 
 .reader-audio {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  z-index: 9;
   display: inline-flex;
   align-items: center;
   gap: 0.55rem;
-  min-width: min(28rem, 42vw);
+  width: min(34rem, calc(100vw - 2rem));
+  transform: translateX(-50%);
   padding: 0.45rem 0.65rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.82);
   border: 1px solid rgba(82, 57, 35, 0.1);
+  box-shadow: 0 14px 40px rgba(45, 35, 27, 0.18);
+  backdrop-filter: blur(18px);
 }
 
-.audio-button,
-.audio-skip-button {
+.audio-button {
+  display: inline-grid;
+  place-items: center;
+  width: 2.2rem;
   min-height: 2.2rem;
-  padding: 0 0.75rem;
+  padding: 0;
   border-radius: 999px;
   background: rgba(47, 68, 56, 0.12);
   color: #2f4438;
@@ -335,6 +345,15 @@ code {
 .audio-button {
   background: #2f4438;
   color: #fbf4eb;
+}
+
+.audio-button svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.audio-button svg {
+  fill: currentColor;
 }
 
 .audio-timeline {
@@ -906,15 +925,13 @@ code {
   }
 
   .reader-audio {
-    min-width: 0;
-    max-width: 52vw;
+    width: calc(100vw - 1rem);
     padding: 0.35rem 0.45rem;
   }
 
-  .audio-button,
-  .audio-skip-button {
+  .audio-button {
+    width: 2rem;
     min-height: 2rem;
-    padding: 0 0.55rem;
   }
 
   .audio-slider {

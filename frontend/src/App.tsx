@@ -279,73 +279,85 @@ function GlobalNavbar({
   onInitializeCefr: () => void;
 }) {
   return (
-    <nav className="reader-navbar" aria-label="Reader navigation">
-      <div className={`reader-header ${showDetails ? "" : "reader-header-compact"}`.trim()}>
-        <div className="reader-nav-start">
-          {showSidebarToggle ? (
-            <button
-              className="nav-icon-button"
-              onClick={onToggleSidebar ?? undefined}
-              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-              aria-pressed={sidebarOpen}
-              type="button"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3.5" y="5" width="17" height="14" rx="2" />
-                <path d="M9 5v14" />
-              </svg>
+    <>
+      <nav className="reader-navbar" aria-label="Reader navigation">
+        <div className={`reader-header ${showDetails ? "" : "reader-header-compact"}`.trim()}>
+          <div className="reader-nav-start">
+            {showSidebarToggle ? (
+              <button
+                className="nav-icon-button"
+                onClick={onToggleSidebar ?? undefined}
+                aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+                aria-pressed={sidebarOpen}
+                type="button"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3.5" y="5" width="17" height="14" rx="2" />
+                  <path d="M9 5v14" />
+                </svg>
+              </button>
+            ) : null}
+            <button className="back-link" onClick={onHome}>
+              Home
             </button>
-          ) : null}
-          <button className="back-link" onClick={onHome}>
-            Home
-          </button>
-        </div>
-        <div className="reader-title-block">
-          {showDetails ? <h1>{title || "Loading..."}</h1> : null}
-        </div>
-        <div className="reader-header-end">
-          <div className="reader-progress" aria-label={showDetails && progressLabel ? `Reading progress ${progressLabel}` : undefined}>
-            {showDetails ? (
-              <>
-                <ProgressRing percent={progressPercent} label={progressLabel || "0.0%"} />
-                <span>{progressLabel}</span>
-              </>
+          </div>
+          <div className="reader-title-block">
+            {showDetails ? <h1>{title || "Loading..."}</h1> : null}
+          </div>
+          <div className="reader-header-end">
+            <div className="reader-progress" aria-label={showDetails && progressLabel ? `Reading progress ${progressLabel}` : undefined}>
+              {showDetails ? (
+                <>
+                  <ProgressRing percent={progressPercent} label={progressLabel || "0.0%"} />
+                  <span>{progressLabel}</span>
+                </>
+              ) : null}
+            </div>
+            {showInitializeCefr ? (
+              <button className="navbar-action-button" onClick={() => void onInitializeCefr()} disabled={initializingCefr} type="button">
+                {initializingCefr ? "Checking..." : "Initialize CEFR"}
+              </button>
             ) : null}
           </div>
-          {audio ? (
-            <div className="reader-audio" aria-label="Audio playback controls">
-              <button className="audio-button" onClick={audio.onTogglePlay} type="button">
-                {audio.playing ? "Pause" : "Play"}
-              </button>
-              <button className="audio-skip-button" onClick={() => audio.onSkip(-10)} type="button">
-                -10s
-              </button>
-              <div className="audio-timeline">
-                <span>{formatClock(audio.currentTime)}</span>
-                <input
-                  className="audio-slider"
-                  type="range"
-                  min={0}
-                  max={Math.max(audio.duration, 0)}
-                  step={0.1}
-                  value={Math.min(audio.currentTime, Math.max(audio.duration, 0))}
-                  onChange={(event) => audio.onSeek(Number(event.target.value))}
-                />
-                <span>{formatClock(audio.duration)}</span>
-              </div>
-              <button className="audio-skip-button" onClick={() => audio.onSkip(10)} type="button">
-                +10s
-              </button>
-            </div>
-          ) : null}
-          {showInitializeCefr ? (
-            <button className="navbar-action-button" onClick={() => void onInitializeCefr()} disabled={initializingCefr} type="button">
-              {initializingCefr ? "Checking..." : "Initialize CEFR"}
-            </button>
-          ) : null}
         </div>
-      </div>
-    </nav>
+      </nav>
+      {audio ? (
+        <div className="reader-audio" aria-label="Audio playback controls">
+          <button className="audio-button" onClick={audio.onTogglePlay} type="button" aria-label={audio.playing ? "Pause" : "Play"}>
+            {audio.playing ? <PauseIcon /> : <PlayIcon />}
+          </button>
+          <div className="audio-timeline">
+            <span>{formatClock(audio.currentTime)}</span>
+            <input
+              className="audio-slider"
+              type="range"
+              min={0}
+              max={Math.max(audio.duration, 0)}
+              step={0.1}
+              value={Math.min(audio.currentTime, Math.max(audio.duration, 0))}
+              onChange={(event) => audio.onSeek(Number(event.target.value))}
+            />
+            <span>{formatClock(audio.duration)}</span>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5h3v14H8zM13 5h3v14h-3z" />
+    </svg>
   );
 }
 
@@ -981,10 +993,13 @@ function ReaderPage({
       return;
     }
     const bounds = element.getBoundingClientRect();
-    if (bounds.bottom > window.innerHeight - 160) {
+    const player = document.querySelector<HTMLElement>(".reader-audio");
+    const bottomInset = (player?.offsetHeight ?? 0) + 48;
+    const visibleBottom = window.innerHeight - bottomInset;
+    if (bounds.bottom > visibleBottom) {
       lastAutoScrollTokenRef.current = activeToken.token_index;
       suppressScrollProgressUntilRef.current = Date.now() + 10000;
-      window.scrollBy({ top: window.innerHeight * 0.7, behavior: "smooth" });
+      window.scrollBy({ top: Math.max(visibleBottom * 0.82, bounds.bottom - visibleBottom), behavior: "smooth" });
     }
   }, [alignmentTokens, audioState.currentTime]);
 
