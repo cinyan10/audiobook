@@ -30,8 +30,9 @@ except ModuleNotFoundError:
 
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
+from app.dictionary import lookup_word
 from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
-from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
+from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, DictionaryLookupPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
 
 
 BOOKS_DIR = Path("data") / "books"
@@ -259,6 +260,16 @@ def check_cefr(payload: CEFRCheckPayload) -> dict[str, object]:
     paragraphs = [paragraph.model_dump() for paragraph in payload.paragraphs if paragraph.text]
     try:
         return {"paragraphs": fetch_indexed_paragraph_tokens(paragraphs)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/dictionary/lookup")
+def dictionary_lookup(payload: DictionaryLookupPayload) -> dict[str, object]:
+    try:
+        return lookup_word(payload.word, payload.context, payload.cefr_level)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

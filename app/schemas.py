@@ -167,3 +167,9 @@ class CEFRJobSummary(BaseModel):
     ready_parts: int
     current_label: str | None = None
     error_message: str | None = None
+
+
+class DictionaryLookupPayload(BaseModel):
+    word: str
+    context: str = ""
+    cefr_level: str = ""
