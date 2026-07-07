@@ -275,6 +275,7 @@ def synthesize_file(
     delay: float,
     retries: int,
     max_chars: int,
+    force: bool = False,
 ) -> bool:
     audio_chunks: list[tuple[str, bytes]] = []
     chunks = chunk_text(text, max_chars=max_chars)
@@ -283,7 +284,7 @@ def synthesize_file(
 
     for index, chunk in enumerate(chunks, start=1):
         chunk_path = chunk_dir / f"chunk-{index:03}.wav"
-        if chunk_path.exists():
+        if chunk_path.exists() and not force:
             print(f"  skipping existing chunk {index}/{len(chunks)}", file=sys.stderr)
             audio_chunks.append(read_wav(chunk_path))
             continue
@@ -440,6 +441,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Only synthesize this ornament-separated part number.",
     )
+    parser.add_argument("--book-id", type=int, help="Generate text from a reader book id instead of the input file.")
+    parser.add_argument("--chapter-index", type=int, help="Reader chapter_index to use with --book-id.")
+    parser.add_argument("--reader-part-index", type=int, help="Reader part_index to use with --book-id.")
     parser.add_argument(
         "--delay",
         type=float,
@@ -458,6 +462,7 @@ def parse_args() -> argparse.Namespace:
         default=MAX_CHARS,
         help="Maximum input characters per TTS request.",
     )
+    parser.add_argument("--force", action="store_true", help="Regenerate even if the output WAV already exists.")
     parser.add_argument(
         "--self-check",
         action="store_true",
@@ -473,6 +478,44 @@ def openai_cost_note(text: str) -> str:
         f"~{input_tokens:,} text tokens "
         "(check OpenAI usage for exact billed cost, including generated audio)"
     )
+
+
+def reader_part_source(book_id: int, chapter_index: int, part_index: int) -> tuple[str, Path, int, int]:
+    from app.db import connect
+    from app.library import chapter_audio_number, get_reader_payload, is_divider_paragraph, is_redundant_title_paragraph
+
+    connection = connect()
+    try:
+        payload = get_reader_payload(connection, book_id)
+        if payload is None:
+            raise RuntimeError(f"Book {book_id} was not found.")
+        chapter = next((item for item in payload["chapters"] if int(item["chapter_index"]) == chapter_index), None)
+        if chapter is None:
+            raise RuntimeError(f"Chapter {chapter_index} was not found for book {book_id}.")
+        part = next((item for item in chapter["parts"] if int(item["part_index"]) == part_index), None)
+        if part is None:
+            raise RuntimeError(f"Part {part_index} was not found for book {book_id} chapter {chapter_index}.")
+        book = connection.execute("SELECT slug, title FROM books WHERE id = ?", (book_id,)).fetchone()
+        paragraphs = connection.execute(
+            """
+            SELECT text
+            FROM book_paragraphs
+            WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
+            ORDER BY paragraph_index
+            """,
+            (book_id, part["start_paragraph_index"], part["end_paragraph_index"]),
+        ).fetchall()
+        text = "\n\n".join(
+            str(row["text"])
+            for row in paragraphs
+            if not is_redundant_title_paragraph(str(book["title"]), str(row["text"]))
+            and not is_divider_paragraph(str(row["text"]))
+        )
+        output = Path("data") / "audio" / str(book["slug"])
+        chapter_number = chapter_audio_number(str(chapter["title"]), chapter_index)
+        return text, output, chapter_number, part_index + 1
+    finally:
+        connection.close()
 
 
 def main() -> int:
@@ -503,8 +546,22 @@ def main() -> int:
         print("self-check passed")
         return 0
 
-    if args.input is None:
+    reader_part_number: int | None = None
+    if args.book_id is not None:
+        if args.chapter_index is None or args.reader_part_index is None:
+            print("--book-id requires --chapter-index and --reader-part-index.", file=sys.stderr)
+            return 1
+        text, output, args.chapter, reader_part_number = reader_part_source(args.book_id, args.chapter_index, args.reader_part_index)
+        args.start = ""
+    elif args.input is None:
         print("input is required unless --self-check is used.", file=sys.stderr)
+        return 1
+    else:
+        text = input_text(args.input)
+        if args.start:
+            text = trim_to_start(text, args.start)
+    if not text:
+        print("input is empty.", file=sys.stderr)
         return 1
 
     if args.provider == "openai":
@@ -522,23 +579,31 @@ def main() -> int:
             return 1
         client = genai.Client(api_key=api_key)
 
-    text = input_text(args.input)
-    if args.start:
-        text = trim_to_start(text, args.start)
-    if not text:
-        print(f"{args.input} is empty.", file=sys.stderr)
-        return 1
-
-    output = args.output or Path("data") / "audio" / book_slug(args.input)
+    if args.output:
+        output = args.output
+    elif args.book_id is None:
+        output = Path("data") / "audio" / book_slug(args.input)
 
     if args.single_file:
         if args.provider == "openai":
             print(openai_cost_note(text), file=sys.stderr)
         print(f"Synthesizing {output}...", file=sys.stderr)
-        if not synthesize_file(args.provider, client, model, voice, text, output, args.delay, args.retries, args.max_chars):
+        if not synthesize_file(args.provider, client, model, voice, text, output, args.delay, args.retries, args.max_chars, args.force):
             return 1
         print(output)
         return 0
+
+    if reader_part_number is not None:
+        output.mkdir(parents=True, exist_ok=True)
+        path = output / f"{part_stem(args.chapter, reader_part_number)}.wav"
+        if path.exists() and not args.force:
+            print(f"Skipping existing {path}", file=sys.stderr)
+            print(output)
+            return 0
+        if args.provider == "openai":
+            print(openai_cost_note(text), file=sys.stderr)
+        print(f"Synthesizing reader part {reader_part_number}: {path}", file=sys.stderr)
+        return 0 if synthesize_file(args.provider, client, model, voice, text, path, args.delay, args.retries, args.max_chars, args.force) else 1
 
     parts = split_parts(text)
     if args.part is not None:
@@ -550,13 +615,13 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     for index, part in enumerate(parts, start=args.part or 1):
         path = output / f"{part_stem(args.chapter, index)}.wav"
-        if path.exists():
+        if path.exists() and not args.force:
             print(f"Skipping existing {path}", file=sys.stderr)
             continue
         if args.provider == "openai":
             print(openai_cost_note(part), file=sys.stderr)
         print(f"Synthesizing part {index}/{len(parts)}: {path}", file=sys.stderr)
-        if not synthesize_file(args.provider, client, model, voice, part, path, args.delay, args.retries, args.max_chars):
+        if not synthesize_file(args.provider, client, model, voice, part, path, args.delay, args.retries, args.max_chars, args.force):
             failed = True
     print(output)
     return 1 if failed else 0
