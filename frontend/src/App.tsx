@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ReactElement } from "react";
 
 type BookSummary = {
   id: number;
@@ -186,6 +186,8 @@ type WordlistEntry = {
   book_title: string;
   root_word: string;
   original_word: string;
+  word_type: string;
+  cefr_level: string;
   context: string;
   paragraph_index: number;
   token_index: number;
@@ -644,14 +646,13 @@ function WordlistPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) 
         <div className="wordlist-list">
           {entries.map((entry) => (
             <article key={entry.id} className="wordlist-entry">
-              <button className="wordlist-word" onClick={() => onOpenBook(entry.book_id)} type="button">
+              <button className={`wordlist-word ${cefrLevelClass(entry.cefr_level)}`} onClick={() => onOpenBook(entry.book_id)} type="button">
                 {entry.root_word}
               </button>
-              <p>{entry.context}</p>
-              <span>
-                {entry.book_title}
-                {entry.original_word !== entry.root_word ? ` · ${entry.original_word}` : ""}
-              </span>
+              {entry.word_type || entry.cefr_level ? (
+                <span className="wordlist-meta">{[entry.word_type, entry.cefr_level].filter(Boolean).join(" · ")}</span>
+              ) : null}
+              <p>{highlightContextWord(entry)}</p>
             </article>
           ))}
         </div>
@@ -2026,6 +2027,33 @@ function sentenceContext(text: string, word: string): string {
   const ends = [text.indexOf(".", index), text.indexOf("!", index), text.indexOf("?", index)].filter((item) => item >= 0);
   const end = ends.length ? Math.min(...ends) + 1 : text.length;
   return text.slice(start, end).trim() || text;
+}
+
+function highlightContextWord(entry: WordlistEntry): Array<string | ReactElement> {
+  const word = entry.original_word || entry.root_word;
+  const pattern = new RegExp(`\\b(${escapeRegExp(word)})\\b`, "i");
+  const match = entry.context.match(pattern);
+  if (!match || match.index === undefined) {
+    return [entry.context];
+  }
+  const before = entry.context.slice(0, match.index);
+  const marked = entry.context.slice(match.index, match.index + match[0].length);
+  const after = entry.context.slice(match.index + match[0].length);
+  return [
+    before,
+    <mark key={`${entry.id}-word`} className={`wordlist-context-word ${cefrLevelClass(entry.cefr_level)}`.trim()}>
+      {marked}
+    </mark>,
+    after,
+  ];
+}
+
+function cefrLevelClass(level: string | null | undefined): string {
+  return level ? `level-${level.toLowerCase()}` : "";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function closestReaderToken(node: Node): HTMLElement | null {

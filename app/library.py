@@ -1164,18 +1164,22 @@ def list_wordlist_entries(connection: sqlite3.Connection, book_id: int | None = 
             b.title AS book_title,
             w.root_word,
             w.original_word,
+            w.word_type,
+            COALESCE(NULLIF(w.cefr_level, ''), t.cefr_level, '') AS cefr_level,
+            t.oxford_tip,
             w.context,
             w.paragraph_index,
             w.token_index,
             w.created_at
         FROM wordlist_entries w
         JOIN books b ON b.id = w.book_id
+        LEFT JOIN book_tokens t ON t.book_id = w.book_id AND t.token_index = w.token_index
         {book_filter}
         ORDER BY w.created_at DESC, w.id DESC
         """,
         params,
     ).fetchall()
-    return [wordlist_entry_values(row) for row in rows]
+    return [wordlist_entry_with_context(connection, row) for row in rows]
 
 
 def save_wordlist_entry(
@@ -1188,7 +1192,7 @@ def save_wordlist_entry(
 ) -> dict[str, object]:
     token = connection.execute(
         """
-        SELECT root_text
+        SELECT root_text, cefr_level, oxford_tip
         FROM book_tokens
         WHERE book_id = ? AND paragraph_index = ? AND token_index = ?
         """,
@@ -1199,13 +1203,16 @@ def save_wordlist_entry(
     root = str(token["root_text"] or root_word(word))
     if not root:
         raise ValueError("Select one English word.")
+    word_type = word_type_from_oxford_tip(str(token["oxford_tip"] or ""))
+    cefr_level = str(token["cefr_level"] or "")
+    stored_context = token_sentence_context(connection, book_id, paragraph_index, token_index) or " ".join(context.split())
     connection.execute(
         """
         INSERT OR IGNORE INTO wordlist_entries (
-            book_id, root_word, original_word, context, paragraph_index, token_index, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            book_id, root_word, original_word, word_type, cefr_level, context, paragraph_index, token_index, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (book_id, root, word, " ".join(context.split()), paragraph_index, token_index, now_iso()),
+        (book_id, root, word, word_type, cefr_level, stored_context, paragraph_index, token_index, now_iso()),
     )
     connection.commit()
     row = connection.execute(
@@ -1216,17 +1223,21 @@ def save_wordlist_entry(
             b.title AS book_title,
             w.root_word,
             w.original_word,
+            w.word_type,
+            COALESCE(NULLIF(w.cefr_level, ''), t.cefr_level, '') AS cefr_level,
+            t.oxford_tip,
             w.context,
             w.paragraph_index,
             w.token_index,
             w.created_at
         FROM wordlist_entries w
         JOIN books b ON b.id = w.book_id
+        LEFT JOIN book_tokens t ON t.book_id = w.book_id AND t.token_index = w.token_index
         WHERE w.book_id = ? AND w.token_index = ?
         """,
         (book_id, token_index),
     ).fetchone()
-    return wordlist_entry_values(row)
+    return wordlist_entry_with_context(connection, row)
 
 
 def summarize_book_row(connection: sqlite3.Connection, book_id: int) -> dict[str, object]:
@@ -1294,11 +1305,64 @@ def wordlist_entry_values(row: sqlite3.Row) -> dict[str, object]:
         "book_title": row["book_title"],
         "root_word": row["root_word"],
         "original_word": row["original_word"],
+        "word_type": row["word_type"] or word_type_from_oxford_tip(str(row["oxford_tip"] or "")),
+        "cefr_level": row["cefr_level"],
         "context": row["context"],
         "paragraph_index": int(row["paragraph_index"]),
         "token_index": int(row["token_index"]),
         "created_at": row["created_at"],
     }
+
+
+def wordlist_entry_with_context(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, object]:
+    entry = wordlist_entry_values(row)
+    entry["context"] = token_sentence_context(connection, int(row["book_id"]), int(row["paragraph_index"]), int(row["token_index"])) or entry["context"]
+    return entry
+
+
+def token_sentence_context(connection: sqlite3.Connection, book_id: int, paragraph_index: int, token_index: int) -> str:
+    tokens = connection.execute(
+        """
+        SELECT token_index, text
+        FROM book_tokens
+        WHERE book_id = ? AND paragraph_index = ?
+        ORDER BY token_index
+        """,
+        (book_id, paragraph_index),
+    ).fetchall()
+    positions = [index for index, token in enumerate(tokens) if int(token["token_index"]) == token_index]
+    if not positions:
+        return ""
+    position = positions[0]
+    start = 0
+    for index in range(position - 1, -1, -1):
+        if str(tokens[index]["text"]) in ".!?":
+            start = index + 1
+            break
+    end = len(tokens)
+    for index in range(position, len(tokens)):
+        if str(tokens[index]["text"]) in ".!?":
+            end = index + 1
+            while end < len(tokens) and str(tokens[end]["text"]).strip() in {'"', "'", "”", "’", ")", "]"}:
+                end += 1
+            break
+    return " ".join("".join(str(token["text"]) for token in tokens[start:end]).split()).lstrip(" \"'”’")
+
+
+def word_type_from_oxford_tip(tip: str) -> str:
+    match = re.search(r"\b([a-z]+)\s*=", tip.lower())
+    if not match:
+        return ""
+    return {
+        "adj": "adjective",
+        "adv": "adverb",
+        "conj": "conjunction",
+        "det": "determiner",
+        "n": "noun",
+        "prep": "preposition",
+        "pron": "pronoun",
+        "v": "verb",
+    }.get(match.group(1), match.group(1))
 
 
 def build_cover_url(book_id: int, cover_path: str | None) -> str | None:

@@ -189,6 +189,8 @@ class WordlistEntry(BaseModel):
     book_title: str
     root_word: str
     original_word: str
+    word_type: str = ""
+    cefr_level: str = ""
     context: str
     paragraph_index: int
     token_index: int

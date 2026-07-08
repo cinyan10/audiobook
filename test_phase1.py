@@ -138,7 +138,7 @@ class Phase1ImportTests(unittest.TestCase):
             books_dir.mkdir()
             epub_path = books_dir / "test-book.epub"
             self._write_epub(epub_path, """<html xmlns="http://www.w3.org/1999/xhtml"><body>
-<p>She was worried about the test.</p>
+<p>First sentence misses it. She was worried about the test.</p>
 </body></html>
 """)
 
@@ -154,22 +154,30 @@ class Phase1ImportTests(unittest.TestCase):
                 for token in chapter_payload["blocks"][0]["paragraph"]["tokens"]
                 if token["normalized_text"] == "worried"
             )
+            connection.execute(
+                "UPDATE book_tokens SET cefr_level = ?, oxford_tip = ? WHERE book_id = ? AND token_index = ?",
+                ("B1", "v=B1", book_id, int(token["token_index"])),
+            )
+            connection.commit()
 
             entry = save_wordlist_entry(
                 connection,
                 book_id,
                 "worried",
-                "She was worried about the test.",
+                "First sentence misses it.",
                 0,
                 int(token["token_index"]),
             )
             self.assertEqual(entry["root_word"], "worry")
+            self.assertEqual(entry["word_type"], "verb")
+            self.assertEqual(entry["cefr_level"], "B1")
             self.assertEqual(entry["context"], "She was worried about the test.")
             duplicate = save_wordlist_entry(connection, book_id, "worried", "Changed context.", 0, int(token["token_index"]))
             self.assertEqual(duplicate["id"], entry["id"])
             entries = list_wordlist_entries(connection)
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["book_title"], "Test Book")
+            self.assertEqual(entries[0]["context"], "She was worried about the test.")
             connection.close()
 
     def test_fetch_paragraph_tokens_aligns_normalized_oxford_output(self) -> None:

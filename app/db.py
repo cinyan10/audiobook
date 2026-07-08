@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS wordlist_entries (
     book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
     root_word TEXT NOT NULL,
     original_word TEXT NOT NULL,
+    word_type TEXT NOT NULL DEFAULT '',
+    cefr_level TEXT NOT NULL DEFAULT '',
     context TEXT NOT NULL,
     paragraph_index INTEGER NOT NULL,
     token_index INTEGER NOT NULL,
@@ -132,6 +134,11 @@ def init_db(db_path: Path = DB_PATH) -> None:
             connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_part_index INTEGER")
         if "last_audio_time_seconds" not in columns:
             connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_time_seconds REAL")
+        wordlist_columns = {row["name"] for row in connection.execute("PRAGMA table_info(wordlist_entries)")}
+        if "word_type" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN word_type TEXT NOT NULL DEFAULT ''")
+        if "cefr_level" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN cefr_level TEXT NOT NULL DEFAULT ''")
         from app.words import root_word
 
         rows = connection.execute("SELECT id, normalized_text FROM book_tokens WHERE root_text = '' AND normalized_text != ''").fetchall()

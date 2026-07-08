@@ -1387,7 +1387,7 @@ code {
 }
 
 .wordlist-head span,
-.wordlist-entry span {
+.wordlist-meta {
   color: rgba(92, 77, 62, 0.68);
   font-size: 0.86rem;
 }
@@ -1406,17 +1406,31 @@ code {
 }
 
 .wordlist-word {
-  grid-row: span 2;
+  grid-column: 1;
+  grid-row: 1;
   align-self: start;
-  padding: 0;
+  width: fit-content;
+  padding: 0.18rem 0.35rem;
   background: transparent;
-  color: #1f5f8c;
   text-align: left;
   font-weight: 800;
   font-size: 1.05rem;
 }
 
+.wordlist-meta {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.wordlist-context-word {
+  padding: 0.05rem 0.18rem;
+  border-radius: 0.18em;
+  font-weight: 800;
+}
+
 .wordlist-entry p {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   margin: 0;
   color: #2d231b;
   line-height: 1.55;
@@ -1455,6 +1469,12 @@ code {
   }
 
   .wordlist-word {
+    grid-row: auto;
+  }
+
+  .wordlist-meta,
+  .wordlist-entry p {
+    grid-column: auto;
     grid-row: auto;
   }
 }
