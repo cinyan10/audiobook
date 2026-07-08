@@ -4,6 +4,7 @@ import re
 import shutil
 
 from oxford_cefr import LEVEL_COLORS, cancel_active_cli, fetch_tokens
+from app.words import root_word
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*")
@@ -57,6 +58,7 @@ def fetch_indexed_paragraph_tokens(paragraphs: list[dict[str, object]]) -> list[
                     "token_index": token_index,
                     "text": token["text"],
                     "normalized_text": normalize_text(token["text"]),
+                    "root_text": root_word(token["text"]),
                     "cefr_level": token.get("level") or None,
                     "oxford_tip": token.get("tip") or None,
                 }

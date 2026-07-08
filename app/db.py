@@ -38,8 +38,21 @@ CREATE TABLE IF NOT EXISTS book_tokens (
     paragraph_index INTEGER NOT NULL,
     text TEXT NOT NULL,
     normalized_text TEXT NOT NULL DEFAULT '',
+    root_text TEXT NOT NULL DEFAULT '',
     cefr_level TEXT,
     oxford_tip TEXT,
+    UNIQUE(book_id, token_index)
+);
+
+CREATE TABLE IF NOT EXISTS wordlist_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    root_word TEXT NOT NULL,
+    original_word TEXT NOT NULL,
+    context TEXT NOT NULL,
+    paragraph_index INTEGER NOT NULL,
+    token_index INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
     UNIQUE(book_id, token_index)
 );
 
@@ -93,6 +106,8 @@ CREATE INDEX IF NOT EXISTS idx_book_cefr_parts_book ON book_cefr_parts(book_id, 
 CREATE INDEX IF NOT EXISTS idx_book_chapters_book ON book_chapters(book_id, chapter_index);
 CREATE INDEX IF NOT EXISTS idx_reading_progress_last_read ON reading_progress(last_read_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cefr_jobs_updated ON cefr_jobs(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wordlist_entries_book ON wordlist_entries(book_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wordlist_entries_root ON wordlist_entries(root_word);
 """
 
 
@@ -107,6 +122,9 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 def init_db(db_path: Path = DB_PATH) -> None:
     with connect(db_path) as connection:
         connection.executescript(SCHEMA)
+        token_columns = {row["name"] for row in connection.execute("PRAGMA table_info(book_tokens)")}
+        if "root_text" not in token_columns:
+            connection.execute("ALTER TABLE book_tokens ADD COLUMN root_text TEXT NOT NULL DEFAULT ''")
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(reading_progress)")}
         if "last_audio_chapter_index" not in columns:
             connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_chapter_index INTEGER")
@@ -114,6 +132,14 @@ def init_db(db_path: Path = DB_PATH) -> None:
             connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_part_index INTEGER")
         if "last_audio_time_seconds" not in columns:
             connection.execute("ALTER TABLE reading_progress ADD COLUMN last_audio_time_seconds REAL")
+        from app.words import root_word
+
+        rows = connection.execute("SELECT id, normalized_text FROM book_tokens WHERE root_text = '' AND normalized_text != ''").fetchall()
+        connection.executemany(
+            "UPDATE book_tokens SET root_text = ? WHERE id = ?",
+            ((root_word(str(row["normalized_text"])), row["id"]) for row in rows),
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_book_tokens_root ON book_tokens(book_id, root_text)")
         connection.commit()
 
 

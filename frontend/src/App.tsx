@@ -19,6 +19,7 @@ type TokenRecord = {
   token_index: number;
   text: string;
   normalized_text: string;
+  root_text: string;
   cefr_level: string | null;
   oxford_tip: string | null;
 };
@@ -172,13 +173,28 @@ type ContextMenuState = {
   word: string;
   context: string;
   cefrLevel: string;
+  paragraphIndex: number;
+  tokenIndex: number;
   target: HTMLElement;
   x: number;
   y: number;
 };
 
+type WordlistEntry = {
+  id: number;
+  book_id: number;
+  book_title: string;
+  root_word: string;
+  original_word: string;
+  context: string;
+  paragraph_index: number;
+  token_index: number;
+  created_at: string;
+};
+
 type ViewState =
   | { kind: "library" }
+  | { kind: "wordlist" }
   | { kind: "reader"; bookId: number; chapterIndex: number | null; partIndex: number | null };
 type NavbarAudioState = {
   playing: boolean;
@@ -225,7 +241,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (view.kind === "library") {
+    if (view.kind !== "reader") {
       setNavbar({
         title: null,
         progressLabel: null,
@@ -278,12 +294,15 @@ function App() {
         showInitializeCefr={view.kind === "library"}
         initializingCefr={cefrJobRunning}
         onInitializeCefr={handleInitializeAllCefr}
+        onWordlist={() => navigateToWordlist()}
       />
       {view.kind === "library" ? (
         <LibraryPage
           onOpenBook={(bookId) => navigateToBook(bookId)}
           refreshSignal={libraryRefreshSignal}
         />
+      ) : view.kind === "wordlist" ? (
+        <WordlistPage onOpenBook={(bookId) => navigateToBook(bookId)} />
       ) : (
         <ReaderPage
           bookId={view.bookId}
@@ -309,6 +328,7 @@ function GlobalNavbar({
   showInitializeCefr,
   initializingCefr,
   onInitializeCefr,
+  onWordlist,
 }: {
   onHome: () => void;
   title: string | null;
@@ -322,6 +342,7 @@ function GlobalNavbar({
   showInitializeCefr: boolean;
   initializingCefr: boolean;
   onInitializeCefr: () => void;
+  onWordlist: () => void;
 }) {
   return (
     <>
@@ -344,6 +365,9 @@ function GlobalNavbar({
             ) : null}
             <button className="back-link" onClick={onHome}>
               Home
+            </button>
+            <button className="back-link" onClick={onWordlist}>
+              Wordlist
             </button>
           </div>
           <div className="reader-title-block">
@@ -571,6 +595,71 @@ function LibraryPage({
   );
 }
 
+function WordlistPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) {
+  const [entries, setEntries] = useState<WordlistEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void fetch("/api/wordlist")
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load wordlist (${response.status})`);
+        }
+        return (await response.json()) as WordlistEntry[];
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setEntries(payload);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load wordlist.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <main className="page wordlist-page">
+      {error ? <p className="error-banner">{error}</p> : null}
+      <section className="wordlist-panel" aria-label="Wordlist">
+        <div className="wordlist-head">
+          <h2>Wordlist</h2>
+          <span>{entries.length} words</span>
+        </div>
+        {loading ? <p className="library-empty">Loading wordlist...</p> : null}
+        {!loading && entries.length === 0 ? <p className="library-empty">Add words from the reader context menu.</p> : null}
+        <div className="wordlist-list">
+          {entries.map((entry) => (
+            <article key={entry.id} className="wordlist-entry">
+              <button className="wordlist-word" onClick={() => onOpenBook(entry.book_id)} type="button">
+                {entry.root_word}
+              </button>
+              <p>{entry.context}</p>
+              <span>
+                {entry.book_title}
+                {entry.original_word !== entry.root_word ? ` · ${entry.original_word}` : ""}
+              </span>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function ReaderPage({
   bookId,
   routeChapterIndex,
@@ -598,6 +687,7 @@ function ReaderPage({
   const [activeTokenIndex, setActiveTokenIndex] = useState<number | null>(null);
   const [lookupDialog, setLookupDialog] = useState<LookupDialogState | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [wordlistEntries, setWordlistEntries] = useState<WordlistEntry[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pronunciationAudioRef = useRef<HTMLAudioElement | null>(null);
   const dictionaryAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -650,6 +740,8 @@ function ReaderPage({
       ? `/api/books/${book.id}/alignment/${selectedChapterIndex}/${currentPart.part_index}`
       : null;
   const currentAudioKey = book && currentPart ? `${book.id}:${selectedChapterIndex}:${currentPart.part_index}` : "";
+  const wordlistRoots = new Set(wordlistEntries.map((entry) => entry.root_word));
+  const wordlistTokenKeys = new Set(wordlistEntries.map((entry) => `${entry.paragraph_index}:${entry.token_index}`));
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
@@ -659,6 +751,34 @@ function ReaderPage({
     tokenRefs.current = {};
     lastSelectionSeekKeyRef.current = "";
   }, [scrollTargetKey]);
+
+  useEffect(() => {
+    if (!book) {
+      setWordlistEntries([]);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/books/${book.id}/wordlist`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load wordlist (${response.status})`);
+        }
+        return (await response.json()) as WordlistEntry[];
+      })
+      .then((entries) => {
+        if (!cancelled) {
+          setWordlistEntries(entries);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWordlistEntries([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [book?.id]);
 
   useEffect(() => {
     audioContextRef.current =
@@ -767,6 +887,24 @@ function ReaderPage({
     const paragraph = target?.closest<HTMLElement>(".reader-paragraph");
     if (target && paragraph) {
       openLookup(word, paragraph.textContent || "", target, target.dataset.cefrLevel || "");
+    }
+  };
+
+  const addContextMenuWordToWordlist = async () => {
+    if (!book || !contextMenu) {
+      return;
+    }
+    try {
+      const entry = await postWordlistEntry(book.id, {
+        word: contextMenu.word,
+        context: contextMenu.context,
+        paragraphIndex: contextMenu.paragraphIndex,
+        tokenIndex: contextMenu.tokenIndex,
+      });
+      setWordlistEntries((current) => [entry, ...current.filter((item) => item.id !== entry.id)]);
+      setContextMenu(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to add word.");
     }
   };
 
@@ -1562,35 +1700,42 @@ function ReaderPage({
                     className="reader-paragraph"
                     data-paragraph-index={block.paragraph.paragraph_index}
                   >
-                    {block.paragraph.tokens.map((token) => (
-                      <span
-                        key={token.token_index}
-                        ref={(node) => {
-                          tokenRefs.current[token.token_index] = node;
-                        }}
-                        className={readerTokenClassName(token, token.token_index === activeTokenIndex)}
-                        title={token.oxford_tip || ""}
-                        data-cefr-level={token.cefr_level || ""}
-                        onClick={() => seekToToken(token)}
-                        onContextMenu={(event) => {
-                          const word = selectedWord(token.text);
-                          if (!word) {
-                            return;
-                          }
-                          event.preventDefault();
-                          setContextMenu({
-                            word,
-                            context: block.paragraph.text,
-                            cefrLevel: token.cefr_level || "",
-                            target: event.currentTarget,
-                            x: event.clientX,
-                            y: event.clientY,
-                          });
-                        }}
-                      >
-                        {token.text}
-                      </span>
-                    ))}
+                    {block.paragraph.tokens.map((token) => {
+                      const tokenKey = `${block.paragraph.paragraph_index}:${token.token_index}`;
+                      const isWordlistExact = wordlistTokenKeys.has(tokenKey);
+                      const isWordlistRoot = Boolean(token.root_text && wordlistRoots.has(token.root_text));
+                      return (
+                        <span
+                          key={token.token_index}
+                          ref={(node) => {
+                            tokenRefs.current[token.token_index] = node;
+                          }}
+                          className={readerTokenClassName(token, token.token_index === activeTokenIndex, isWordlistExact, isWordlistRoot)}
+                          title={token.oxford_tip || ""}
+                          data-cefr-level={token.cefr_level || ""}
+                          onClick={() => seekToToken(token)}
+                          onContextMenu={(event) => {
+                            const word = selectedWord(token.text);
+                            if (!word) {
+                              return;
+                            }
+                            event.preventDefault();
+                            setContextMenu({
+                              word,
+                              context: sentenceContext(block.paragraph.text, word),
+                              cefrLevel: token.cefr_level || "",
+                              paragraphIndex: block.paragraph.paragraph_index,
+                              tokenIndex: token.token_index,
+                              target: event.currentTarget,
+                              x: event.clientX,
+                              y: event.clientY,
+                            });
+                          }}
+                        >
+                          {token.text}
+                        </span>
+                      );
+                    })}
                   </p>
                 ),
               )}
@@ -1613,6 +1758,9 @@ function ReaderPage({
           <div className="reader-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
             <button onClick={() => openLookup(contextMenu.word, contextMenu.context, contextMenu.target, contextMenu.cefrLevel)} type="button">
               Look up word
+            </button>
+            <button onClick={() => void addContextMenuWordToWordlist()} type="button">
+              Add to Wordlist
             </button>
           </div>
         ) : null}
@@ -1762,10 +1910,12 @@ function countWords(text: string): number {
   return trimmed ? trimmed.split(/\s+/).length : 0;
 }
 
-function readerTokenClassName(token: TokenRecord, active: boolean): string {
+function readerTokenClassName(token: TokenRecord, active: boolean, wordlistExact = false, wordlistRoot = false): string {
   return [
     "reader-token",
     token.cefr_level ? `level-${token.cefr_level.toLowerCase()}` : "",
+    wordlistRoot ? "reader-token-wordlist-root" : "",
+    wordlistExact ? "reader-token-wordlist-exact" : "",
     active ? "reader-token-active" : "",
   ]
     .filter(Boolean)
@@ -1867,6 +2017,17 @@ function selectedWord(text: string): string {
   return text.trim().match(/[A-Za-z]+(?:['-][A-Za-z]+)*/)?.[0] ?? "";
 }
 
+function sentenceContext(text: string, word: string): string {
+  const index = text.toLowerCase().indexOf(word.toLowerCase());
+  if (index < 0) {
+    return text;
+  }
+  const start = Math.max(text.lastIndexOf(".", index), text.lastIndexOf("!", index), text.lastIndexOf("?", index)) + 1;
+  const ends = [text.indexOf(".", index), text.indexOf("!", index), text.indexOf("?", index)].filter((item) => item >= 0);
+  const end = ends.length ? Math.min(...ends) + 1 : text.length;
+  return text.slice(start, end).trim() || text;
+}
+
 function closestReaderToken(node: Node): HTMLElement | null {
   const element = node instanceof HTMLElement ? node : node.parentElement;
   return element?.closest<HTMLElement>(".reader-token") ?? null;
@@ -1883,6 +2044,9 @@ function migrateHashRoute() {
 
 function readLocation(): ViewState {
   const pathname = window.location.pathname;
+  if (pathname.match(/^\/wordlist\/?$/)) {
+    return { kind: "wordlist" };
+  }
   const partMatch = pathname.match(/^\/books\/(\d+)\/chapters\/(\d+)\/parts\/(\d+)\/?$/);
   if (partMatch) {
     return {
@@ -1907,6 +2071,11 @@ function navigateToBook(bookId: number) {
 
 function navigateToLibrary() {
   window.history.pushState({}, "", "/");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function navigateToWordlist() {
+  window.history.pushState({}, "", "/wordlist");
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
@@ -1957,6 +2126,26 @@ async function postProgress(
     throw new Error(`Failed to save progress (${response.status})`);
   }
   return (await response.json()) as ProgressRecord;
+}
+
+async function postWordlistEntry(
+  bookId: number,
+  payload: { word: string; context: string; paragraphIndex: number; tokenIndex: number },
+): Promise<WordlistEntry> {
+  const response = await fetch(`/api/books/${bookId}/wordlist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      word: payload.word,
+      context: payload.context,
+      paragraph_index: payload.paragraphIndex,
+      token_index: payload.tokenIndex,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to add word (${response.status})`);
+  }
+  return (await response.json()) as WordlistEntry;
 }
 
 export default App;

@@ -31,8 +31,8 @@ except ModuleNotFoundError:
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
 from app.dictionary import lookup_word
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, store_uploaded_book
-from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, DictionaryLookupPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary
+from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, list_wordlist_entries, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, store_uploaded_book
+from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, DictionaryLookupPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary, WordlistEntry, WordlistEntryPayload
 
 
 BOOKS_DIR = Path("data") / "books"
@@ -274,6 +274,36 @@ def dictionary_lookup(payload: DictionaryLookupPayload) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/wordlist", response_model=list[WordlistEntry])
+def get_wordlist() -> list[dict[str, object]]:
+    with get_connection() as connection:
+        return list_wordlist_entries(connection)
+
+
+@app.get("/api/books/{book_id}/wordlist", response_model=list[WordlistEntry])
+def get_book_wordlist(book_id: Annotated[int, PathParam(ge=1)]) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        book = get_reader_payload(connection, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="Book not found.")
+        return list_wordlist_entries(connection, book_id)
+
+
+@app.post("/api/books/{book_id}/wordlist", response_model=WordlistEntry)
+def add_book_wordlist_entry(
+    book_id: Annotated[int, PathParam(ge=1)],
+    payload: WordlistEntryPayload,
+) -> dict[str, object]:
+    with get_connection() as connection:
+        book = get_reader_payload(connection, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="Book not found.")
+        try:
+            return save_wordlist_entry(connection, book_id, payload.word, payload.context, payload.paragraph_index, payload.token_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/books/{book_id}/progress", response_model=ProgressSummary)

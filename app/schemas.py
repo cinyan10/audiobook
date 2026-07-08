@@ -40,6 +40,7 @@ class TokenRecord(BaseModel):
     token_index: int
     text: str
     normalized_text: str
+    root_text: str = ""
     cefr_level: str | None = None
     oxford_tip: str | None = None
 
@@ -173,3 +174,22 @@ class DictionaryLookupPayload(BaseModel):
     word: str
     context: str = ""
     cefr_level: str = ""
+
+
+class WordlistEntryPayload(BaseModel):
+    word: str
+    context: str
+    paragraph_index: int = Field(ge=0)
+    token_index: int = Field(ge=0)
+
+
+class WordlistEntry(BaseModel):
+    id: int
+    book_id: int
+    book_title: str
+    root_word: str
+    original_word: str
+    context: str
+    paragraph_index: int
+    token_index: int
+    created_at: str

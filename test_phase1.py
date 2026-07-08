@@ -10,7 +10,8 @@ from zipfile import ZipFile
 from app.db import connect, init_db
 from app.alignment import map_transcript_to_tokens
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, scan_books_directory, start_cefr_job
+from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
+from app.words import root_word
 
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -127,6 +128,48 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(scanned["skipped"], 1)
             self.assertEqual(len(scanned["books"]), 1)
             self.assertEqual(get_cefr_job_status(connection)["ready_parts"], 1)
+            connection.close()
+
+    def test_wordlist_saves_root_word_and_context_once(self) -> None:
+        self.assertEqual(root_word("worried"), "worry")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>She was worried about the test.</p>
+</body></html>
+""")
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+            summary, _ = import_book(connection, epub_path)
+            book_id = int(summary["id"])
+            chapter_payload = get_chapter_payload(connection, book_id, 0)
+            assert chapter_payload is not None
+            token = next(
+                token
+                for token in chapter_payload["blocks"][0]["paragraph"]["tokens"]
+                if token["normalized_text"] == "worried"
+            )
+
+            entry = save_wordlist_entry(
+                connection,
+                book_id,
+                "worried",
+                "She was worried about the test.",
+                0,
+                int(token["token_index"]),
+            )
+            self.assertEqual(entry["root_word"], "worry")
+            self.assertEqual(entry["context"], "She was worried about the test.")
+            duplicate = save_wordlist_entry(connection, book_id, "worried", "Changed context.", 0, int(token["token_index"]))
+            self.assertEqual(duplicate["id"], entry["id"])
+            entries = list_wordlist_entries(connection)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["book_title"], "Test Book")
             connection.close()
 
     def test_fetch_paragraph_tokens_aligns_normalized_oxford_output(self) -> None:

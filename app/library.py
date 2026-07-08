@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote
 
 from app.cefr import MAX_CEFR_CHARS, cancel_cefr_fetch, fetch_paragraph_tokens, normalize_text, plain_tokens
 from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugify
+from app.words import root_word
 
 
 CEFR_FETCH_LOCK = threading.Lock()
@@ -127,7 +128,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
     extracted = read_epub(path)
     grouped_tokens = [plain_tokens(paragraph) for paragraph in extracted.paragraphs]
     paragraph_rows: list[tuple[int, str]] = []
-    token_rows: list[tuple[int, int, str, str, str | None, str | None]] = []
+    token_rows: list[tuple[int, int, str, str, str, str | None, str | None]] = []
     token_index = 0
 
     for paragraph_index, paragraph in enumerate(extracted.paragraphs):
@@ -139,6 +140,7 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
                     paragraph_index,
                     token["text"],
                     normalize_text(token["text"]),
+                    root_word(token["text"]),
                     None,
                     None,
                 )
@@ -202,12 +204,12 @@ def import_book(connection: sqlite3.Connection, path: Path, *, with_cefr: bool =
     )
     connection.executemany(
         """
-        INSERT INTO book_tokens (book_id, token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO book_tokens (book_id, token_index, paragraph_index, text, normalized_text, root_text, cefr_level, oxford_tip)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            (book_id, token_index_value, paragraph_index, text, normalized_text, cefr_level, oxford_tip)
-            for token_index_value, paragraph_index, text, normalized_text, cefr_level, oxford_tip in token_rows
+            (book_id, token_index_value, paragraph_index, text, normalized_text, root_text, cefr_level, oxford_tip)
+            for token_index_value, paragraph_index, text, normalized_text, root_text, cefr_level, oxford_tip in token_rows
         ),
     )
 
@@ -606,7 +608,7 @@ def get_cefr_part_payload(connection: sqlite3.Connection, book_id: int, part_ind
     ).fetchall()
     tokens = connection.execute(
         """
-        SELECT token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip
+        SELECT token_index, paragraph_index, text, normalized_text, root_text, cefr_level, oxford_tip
         FROM book_tokens
         WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
         ORDER BY token_index
@@ -620,6 +622,7 @@ def get_cefr_part_payload(connection: sqlite3.Connection, book_id: int, part_ind
                 "token_index": token["token_index"],
                 "text": token["text"],
                 "normalized_text": token["normalized_text"],
+                "root_text": token["root_text"],
                 "cefr_level": token["cefr_level"],
                 "oxford_tip": token["oxford_tip"],
             }
@@ -749,7 +752,7 @@ def build_raw_chapter_blocks(
     ).fetchall()
     tokens = connection.execute(
         """
-        SELECT token_index, paragraph_index, text, normalized_text, cefr_level, oxford_tip
+        SELECT token_index, paragraph_index, text, normalized_text, root_text, cefr_level, oxford_tip
         FROM book_tokens
         WHERE book_id = ? AND paragraph_index BETWEEN ? AND ?
         ORDER BY token_index
@@ -763,6 +766,7 @@ def build_raw_chapter_blocks(
                 "token_index": token["token_index"],
                 "text": token["text"],
                 "normalized_text": token["normalized_text"],
+                "root_text": token["root_text"],
                 "cefr_level": token["cefr_level"],
                 "oxford_tip": token["oxford_tip"],
             }
@@ -1149,6 +1153,82 @@ def save_progress(
     return payload["progress"]
 
 
+def list_wordlist_entries(connection: sqlite3.Connection, book_id: int | None = None) -> list[dict[str, object]]:
+    book_filter = "WHERE w.book_id = ?" if book_id is not None else ""
+    params = (book_id,) if book_id is not None else ()
+    rows = connection.execute(
+        f"""
+        SELECT
+            w.id,
+            w.book_id,
+            b.title AS book_title,
+            w.root_word,
+            w.original_word,
+            w.context,
+            w.paragraph_index,
+            w.token_index,
+            w.created_at
+        FROM wordlist_entries w
+        JOIN books b ON b.id = w.book_id
+        {book_filter}
+        ORDER BY w.created_at DESC, w.id DESC
+        """,
+        params,
+    ).fetchall()
+    return [wordlist_entry_values(row) for row in rows]
+
+
+def save_wordlist_entry(
+    connection: sqlite3.Connection,
+    book_id: int,
+    word: str,
+    context: str,
+    paragraph_index: int,
+    token_index: int,
+) -> dict[str, object]:
+    token = connection.execute(
+        """
+        SELECT root_text
+        FROM book_tokens
+        WHERE book_id = ? AND paragraph_index = ? AND token_index = ?
+        """,
+        (book_id, paragraph_index, token_index),
+    ).fetchone()
+    if not token:
+        raise ValueError("Word token not found.")
+    root = str(token["root_text"] or root_word(word))
+    if not root:
+        raise ValueError("Select one English word.")
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO wordlist_entries (
+            book_id, root_word, original_word, context, paragraph_index, token_index, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (book_id, root, word, " ".join(context.split()), paragraph_index, token_index, now_iso()),
+    )
+    connection.commit()
+    row = connection.execute(
+        """
+        SELECT
+            w.id,
+            w.book_id,
+            b.title AS book_title,
+            w.root_word,
+            w.original_word,
+            w.context,
+            w.paragraph_index,
+            w.token_index,
+            w.created_at
+        FROM wordlist_entries w
+        JOIN books b ON b.id = w.book_id
+        WHERE w.book_id = ? AND w.token_index = ?
+        """,
+        (book_id, token_index),
+    ).fetchone()
+    return wordlist_entry_values(row)
+
+
 def summarize_book_row(connection: sqlite3.Connection, book_id: int) -> dict[str, object]:
     row = connection.execute(
         """
@@ -1204,6 +1284,20 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
         "progress_percent": percent,
         "progress_label": f"Paragraph {min(current_paragraph + 1, total_paragraphs)} of {total_paragraphs}",
         "last_read_at": row["last_read_at"],
+    }
+
+
+def wordlist_entry_values(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": int(row["id"]),
+        "book_id": int(row["book_id"]),
+        "book_title": row["book_title"],
+        "root_word": row["root_word"],
+        "original_word": row["original_word"],
+        "context": row["context"],
+        "paragraph_index": int(row["paragraph_index"]),
+        "token_index": int(row["token_index"]),
+        "created_at": row["created_at"],
     }
 
 

@@ -862,6 +862,18 @@ code {
   background: transparent;
 }
 
+.reader-token-wordlist-root {
+  background: rgba(40, 126, 118, 0.16);
+  border-radius: 0.18em;
+  box-shadow: 0 0 0 0.08em rgba(40, 126, 118, 0.12);
+}
+
+.reader-token-wordlist-exact {
+  background: rgba(42, 101, 176, 0.2);
+  border-radius: 0.18em;
+  box-shadow: 0 0 0 0.1em rgba(42, 101, 176, 0.16);
+}
+
 .reader-token-active {
   background: #f3c756;
   color: #21170f;
@@ -870,11 +882,12 @@ code {
 }
 
 .reader-token:hover {
-  background: transparent;
+  filter: brightness(0.96);
 }
 
 .reader-token-active:hover {
   background: #f3c756;
+  filter: none;
 }
 
 .reader-context-menu {
@@ -1345,6 +1358,70 @@ code {
   color: #7d1732;
 }
 
+.wordlist-page {
+  width: min(980px, calc(100vw - 3rem));
+  padding-top: 2.4rem;
+}
+
+.wordlist-panel {
+  padding: 1.4rem;
+  background: rgba(255, 250, 244, 0.78);
+  border: 1px solid rgba(82, 57, 35, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(82, 57, 35, 0.1);
+  backdrop-filter: blur(10px);
+}
+
+.wordlist-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.wordlist-head h2 {
+  margin: 0;
+  color: #241b15;
+  font-size: 1.35rem;
+}
+
+.wordlist-head span,
+.wordlist-entry span {
+  color: rgba(92, 77, 62, 0.68);
+  font-size: 0.86rem;
+}
+
+.wordlist-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.wordlist-entry {
+  display: grid;
+  grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr);
+  gap: 0.35rem 1rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid rgba(82, 57, 35, 0.08);
+}
+
+.wordlist-word {
+  grid-row: span 2;
+  align-self: start;
+  padding: 0;
+  background: transparent;
+  color: #1f5f8c;
+  text-align: left;
+  font-weight: 800;
+  font-size: 1.05rem;
+}
+
+.wordlist-entry p {
+  margin: 0;
+  color: #2d231b;
+  line-height: 1.55;
+}
+
 @keyframes shelf-enter {
   from {
     opacity: 0;
@@ -1366,5 +1443,18 @@ code {
   .library-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 1.8rem 1rem;
+  }
+
+  .wordlist-page {
+    width: min(100vw - 1rem, 980px);
+    padding-top: 1.25rem;
+  }
+
+  .wordlist-entry {
+    grid-template-columns: 1fr;
+  }
+
+  .wordlist-word {
+    grid-row: auto;
   }
 }
