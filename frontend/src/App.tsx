@@ -684,6 +684,7 @@ function ReaderPage({
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [loadingCefr, setLoadingCefr] = useState(false);
+  const [generatingAudio, setGeneratingAudio] = useState(false);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const [alignmentTokens, setAlignmentTokens] = useState<TimedTokenRecord[]>([]);
   const [activeTokenIndex, setActiveTokenIndex] = useState<number | null>(null);
@@ -829,6 +830,7 @@ function ReaderPage({
     }
     audio.currentTime = window.start;
     setAudioState((current) => ({ ...current, currentTime: window.start }));
+    setActiveTokenIndex(token.token_index);
   };
 
   const playPronunciation = (src: string, window: { start: number; end: number }) => {
@@ -921,6 +923,29 @@ function ReaderPage({
       setContextMenu(null);
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : "Failed to remove word.");
+    }
+  };
+
+  const generateCurrentPartAudio = async () => {
+    if (!book || !currentPart || generatingAudio) {
+      return;
+    }
+    setGeneratingAudio(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/books/${book.id}/audio/${selectedChapterIndex}/${currentPart.part_index}/generate`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error((await response.json()).detail || `Audio generation failed (${response.status})`);
+      }
+      const nextBook = (await response.json()) as ReaderPayload;
+      setBook(nextBook);
+      lastLoadedAudioKeyRef.current = "";
+    } catch (generateError) {
+      setError(generateError instanceof Error ? generateError.message : "Audio generation failed.");
+    } finally {
+      setGeneratingAudio(false);
     }
   };
 
@@ -1686,11 +1711,21 @@ function ReaderPage({
                 {currentPartWordCount !== null ? <span className="legend-pill neutral">{currentPartWordCount} words</span> : null}
                 {loadingChapter ? <span className="legend-pill neutral">Loading chapter...</span> : null}
                 {loadingCefr ? <span className="legend-pill neutral">Loading current section...</span> : null}
+                {currentPart ? (
+                  <button
+                    className="part-audio-button"
+                    onClick={() => void generateCurrentPartAudio()}
+                    disabled={generatingAudio}
+                    type="button"
+                  >
+                    {generatingAudio ? "Generating audio..." : currentPart.audio_available ? "Regenerate audio" : "Generate audio"}
+                  </button>
+                ) : null}
               </div>
 
               <div className={`chapter-heading ${isImageOnlyView ? "chapter-heading-image-only" : ""}`}>
                 <h2>{currentChapter?.title || "Loading..."}</h2>
-                {currentPart ? <p className="chapter-part-label">{currentPart.title}</p> : null}
+                {currentPart && (currentChapter?.parts.length ?? 0) > 1 ? <p className="chapter-part-label">{currentPart.title}</p> : null}
               </div>
 
               {visibleBlocks.map((block) =>

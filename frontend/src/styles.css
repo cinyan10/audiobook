@@ -312,6 +312,27 @@ code {
   opacity: 0.68;
 }
 
+.part-audio-button {
+  min-height: 2.35rem;
+  margin-left: auto;
+  padding: 0 1rem;
+  border-radius: 999px;
+  background: #2f4438;
+  color: #fbf4eb;
+  font: 700 0.78rem/1 "Cascadia Code", "SFMono-Regular", monospace;
+  box-shadow: 0 10px 24px rgba(47, 68, 56, 0.18);
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.part-audio-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.part-audio-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .reader-audio {
   position: fixed;
   left: 50%;
@@ -439,6 +460,7 @@ code {
 .reader-legend {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.6rem;
   margin: 1.25rem 0 0;
 }
@@ -1052,6 +1074,11 @@ code {
 
   .reader-layout {
     width: 100%;
+  }
+
+  .part-audio-button {
+    width: 100%;
+    margin-left: 0;
   }
 
   .chapter-list {

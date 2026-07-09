@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from uvicorn.logging import AccessFormatter, DefaultFormatter
 
+from app.audio_generation import generate_part_audio_and_alignment
 from app.cefr import fetch_indexed_paragraph_tokens
 from app.epub import read_epub_zip_asset
 
@@ -219,6 +220,26 @@ def get_book_part_alignment(
         payload = get_book_part_alignment_payload(connection, book_id, chapter_index, part_index)
     if payload is None:
         raise HTTPException(status_code=404, detail="Alignment not found.")
+    return payload
+
+
+@app.post("/api/books/{book_id}/audio/{chapter_index}/{part_index}/generate", response_model=ReaderPayload)
+def generate_book_part_audio(
+    book_id: Annotated[int, PathParam(ge=1)],
+    chapter_index: Annotated[int, PathParam(ge=0)],
+    part_index: Annotated[int, PathParam(ge=0)],
+) -> dict[str, object]:
+    with get_connection() as connection:
+        if get_reader_payload(connection, book_id) is None:
+            raise HTTPException(status_code=404, detail="Book not found.")
+        try:
+            generate_part_audio_and_alignment(connection, book_id, chapter_index, part_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        payload = get_reader_payload(connection, book_id)
+    assert payload is not None
     return payload
 
 

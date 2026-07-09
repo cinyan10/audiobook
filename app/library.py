@@ -883,7 +883,7 @@ def build_chapter_parts(
                 "end_paragraph_index": end_paragraph_index,
             }
         )
-    return parts if len(parts) > 1 else []
+    return parts
 
 
 def chapter_group_key(title: str, source_href: str) -> str | None:
@@ -977,9 +977,10 @@ def cefr_sidebar_label(connection: sqlite3.Connection, book_id: int, paragraph_i
     for chapter in build_reader_chapters(chapter_rows, paragraph_rows):
         if not int(chapter["start_paragraph_index"]) <= paragraph_index <= int(chapter["end_paragraph_index"]):
             continue
-        for part in chapter["parts"]:
-            if int(part["start_paragraph_index"]) <= paragraph_index <= int(part["end_paragraph_index"]):
-                return f"{book_title} · {chapter['title']} · {part['title']}"
+        if len(chapter["parts"]) > 1:
+            for part in chapter["parts"]:
+                if int(part["start_paragraph_index"]) <= paragraph_index <= int(part["end_paragraph_index"]):
+                    return f"{book_title} · {chapter['title']} · {part['title']}"
         return f"{book_title} · {chapter['title']}"
     return book_title
 
