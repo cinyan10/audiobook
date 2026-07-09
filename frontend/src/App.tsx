@@ -171,6 +171,7 @@ type LookupDialogState = {
 
 type ContextMenuState = {
   word: string;
+  rootWord: string;
   context: string;
   cefrLevel: string;
   paragraphIndex: number;
@@ -743,6 +744,7 @@ function ReaderPage({
   const currentAudioKey = book && currentPart ? `${book.id}:${selectedChapterIndex}:${currentPart.part_index}` : "";
   const wordlistRoots = new Set(wordlistEntries.map((entry) => entry.root_word));
   const wordlistTokenKeys = new Set(wordlistEntries.map((entry) => `${entry.paragraph_index}:${entry.token_index}`));
+  const contextMenuWordIsSaved = Boolean(contextMenu?.rootWord && wordlistRoots.has(contextMenu.rootWord));
 
   useEffect(() => {
     chapterParagraphsRef.current = currentParagraphs;
@@ -906,6 +908,19 @@ function ReaderPage({
       setContextMenu(null);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to add word.");
+    }
+  };
+
+  const removeContextMenuWordFromWordlist = async () => {
+    if (!book || !contextMenu) {
+      return;
+    }
+    try {
+      await deleteWordlistEntry(book.id, contextMenu.paragraphIndex, contextMenu.tokenIndex);
+      setWordlistEntries((current) => current.filter((entry) => entry.root_word !== contextMenu.rootWord));
+      setContextMenu(null);
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : "Failed to remove word.");
     }
   };
 
@@ -1723,6 +1738,7 @@ function ReaderPage({
                             event.preventDefault();
                             setContextMenu({
                               word,
+                              rootWord: token.root_text || word.toLowerCase(),
                               context: sentenceContext(block.paragraph.text, word),
                               cefrLevel: token.cefr_level || "",
                               paragraphIndex: block.paragraph.paragraph_index,
@@ -1760,9 +1776,15 @@ function ReaderPage({
             <button onClick={() => openLookup(contextMenu.word, contextMenu.context, contextMenu.target, contextMenu.cefrLevel)} type="button">
               Look up word
             </button>
-            <button onClick={() => void addContextMenuWordToWordlist()} type="button">
-              Add to Wordlist
-            </button>
+            {contextMenuWordIsSaved ? (
+              <button onClick={() => void removeContextMenuWordFromWordlist()} type="button">
+                Remove from Wordlist
+              </button>
+            ) : (
+              <button onClick={() => void addContextMenuWordToWordlist()} type="button">
+                Add to Wordlist
+              </button>
+            )}
           </div>
         ) : null}
         {lookupDialog ? <LookupDialog lookup={lookupDialog} onClose={() => setLookupDialog(null)} /> : null}
@@ -2174,6 +2196,20 @@ async function postWordlistEntry(
     throw new Error(`Failed to add word (${response.status})`);
   }
   return (await response.json()) as WordlistEntry;
+}
+
+async function deleteWordlistEntry(bookId: number, paragraphIndex: number, tokenIndex: number): Promise<void> {
+  const response = await fetch(`/api/books/${bookId}/wordlist`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      paragraph_index: paragraphIndex,
+      token_index: tokenIndex,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to remove word (${response.status})`);
+  }
 }
 
 export default App;

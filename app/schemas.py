@@ -183,6 +183,15 @@ class WordlistEntryPayload(BaseModel):
     token_index: int = Field(ge=0)
 
 
+class WordlistEntryDeletePayload(BaseModel):
+    paragraph_index: int = Field(ge=0)
+    token_index: int = Field(ge=0)
+
+
+class WordlistEntryDeleteSummary(BaseModel):
+    removed: bool
+
+
 class WordlistEntry(BaseModel):
     id: int
     book_id: int

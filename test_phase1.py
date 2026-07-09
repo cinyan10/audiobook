@@ -10,7 +10,7 @@ from zipfile import ZipFile
 from app.db import connect, init_db
 from app.alignment import map_transcript_to_tokens
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
+from app.library import chapter_heading_paragraphs_to_skip, delete_wordlist_entry, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
 from app.words import root_word
 
 
@@ -178,6 +178,9 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["book_title"], "Test Book")
             self.assertEqual(entries[0]["context"], "She was worried about the test.")
+            removed = delete_wordlist_entry(connection, book_id, 0, int(token["token_index"]))
+            self.assertTrue(removed)
+            self.assertEqual(list_wordlist_entries(connection), [])
             connection.close()
 
     def test_fetch_paragraph_tokens_aligns_normalized_oxford_output(self) -> None:

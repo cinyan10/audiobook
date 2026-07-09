@@ -31,8 +31,8 @@ except ModuleNotFoundError:
 from app.cefr_jobs import CEFRBatchRunner
 from app.db import get_connection, init_db
 from app.dictionary import lookup_word
-from app.library import ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, list_wordlist_entries, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, store_uploaded_book
-from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, DictionaryLookupPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary, WordlistEntry, WordlistEntryPayload
+from app.library import delete_wordlist_entry, ensure_cefr_parts, enrich_book_part_cefr, get_book_asset, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_cefr_part_payload, get_chapter_payload, get_reader_payload, import_book, list_books, list_wordlist_entries, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, store_uploaded_book
+from app.schemas import AlignmentPayload, BookSummary, CEFRCheckPayload, CEFRCheckSummary, CEFRJobSummary, CEFRPartLoadSummary, ChapterPayload, DictionaryLookupPayload, ProgressPayload, ProgressSummary, ReaderPayload, ScanSummary, UploadSummary, WordlistEntry, WordlistEntryDeletePayload, WordlistEntryDeleteSummary, WordlistEntryPayload
 
 
 BOOKS_DIR = Path("data") / "books"
@@ -302,6 +302,21 @@ def add_book_wordlist_entry(
             raise HTTPException(status_code=404, detail="Book not found.")
         try:
             return save_wordlist_entry(connection, book_id, payload.word, payload.context, payload.paragraph_index, payload.token_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/books/{book_id}/wordlist", response_model=WordlistEntryDeleteSummary)
+def remove_book_wordlist_entry(
+    book_id: Annotated[int, PathParam(ge=1)],
+    payload: WordlistEntryDeletePayload,
+) -> dict[str, bool]:
+    with get_connection() as connection:
+        book = get_reader_payload(connection, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="Book not found.")
+        try:
+            return {"removed": delete_wordlist_entry(connection, book_id, payload.paragraph_index, payload.token_index)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

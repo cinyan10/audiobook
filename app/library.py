@@ -1240,6 +1240,33 @@ def save_wordlist_entry(
     return wordlist_entry_with_context(connection, row)
 
 
+def delete_wordlist_entry(
+    connection: sqlite3.Connection,
+    book_id: int,
+    paragraph_index: int,
+    token_index: int,
+) -> bool:
+    token = connection.execute(
+        """
+        SELECT root_text
+        FROM book_tokens
+        WHERE book_id = ? AND paragraph_index = ? AND token_index = ?
+        """,
+        (book_id, paragraph_index, token_index),
+    ).fetchone()
+    if not token:
+        raise ValueError("Word token not found.")
+    root = str(token["root_text"] or "")
+    if not root:
+        raise ValueError("Select one English word.")
+    cursor = connection.execute(
+        "DELETE FROM wordlist_entries WHERE book_id = ? AND root_word = ?",
+        (book_id, root),
+    )
+    connection.commit()
+    return cursor.rowcount > 0
+
+
 def summarize_book_row(connection: sqlite3.Connection, book_id: int) -> dict[str, object]:
     row = connection.execute(
         """
