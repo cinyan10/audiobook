@@ -1636,8 +1636,7 @@ function ReaderPage({
                       if (chapter.parts.length) {
                         navigateToBookPart(book.id, chapter.chapter_index, chapter.parts[0].part_index);
                       } else {
-                        setSelectedChapterIndex(chapter.chapter_index);
-                        setSelectedPartIndex(null);
+                        navigateToBookPart(book.id, chapter.chapter_index, 0);
                       }
                       if (isSidebarFloating) {
                         setSidebarOpen(false);
@@ -1881,11 +1880,14 @@ function findRoutePart(
   chapters: ChapterRecord[],
   chapterIndex: number | null,
   partIndex: number | null,
-): { chapterIndex: number; partIndex: number } | null {
+): { chapterIndex: number; partIndex: number | null } | null {
   if (chapterIndex === null || partIndex === null) {
     return null;
   }
   const chapter = chapters.find((item) => item.chapter_index === chapterIndex);
+  if (chapter && !chapter.parts.length && partIndex === 0) {
+    return { chapterIndex, partIndex: null };
+  }
   const part = chapter?.parts.find((item) => item.part_index === partIndex);
   return chapter && part ? { chapterIndex, partIndex } : null;
 }
