@@ -9,6 +9,7 @@ from zipfile import ZipFile
 
 from app.db import connect, init_db
 from app.alignment import map_transcript_to_tokens
+from app.audio_generation import missing_alignment_spans
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
 from app.library import chapter_heading_paragraphs_to_skip, delete_wordlist_entry, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
 from app.words import root_word
@@ -53,6 +54,12 @@ ORNAMENT_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
 REDUNDANT_TITLE_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
 <p>-- Test Book</p>
 <p>Chapter line.</p>
+</body></html>
+"""
+
+MISSING_AUDIO_CHAPTER_HTML = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>-- Test Book</p>
+<p>One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen.</p>
 </body></html>
 """
 
@@ -489,6 +496,37 @@ class Phase1ImportTests(unittest.TestCase):
                 {"token_index": 12, "paragraph_index": 2, "text": "world", "start_time": 0.45, "end_time": 0.8},
             ],
         )
+
+    def test_large_missing_alignment_span_is_detected_without_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, MISSING_AUDIO_CHAPTER_HTML)
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+            summary, _ = import_book(connection, epub_path)
+
+            spans = missing_alignment_spans(
+                connection,
+                int(summary["id"]),
+                0,
+                0,
+                {
+                    "tokens": [
+                        {"token_index": 0, "paragraph_index": 0, "text": "Test"},
+                        {"token_index": 1, "paragraph_index": 0, "text": "Book"},
+                    ]
+                },
+            )
+
+            self.assertEqual(len(spans), 1)
+            self.assertEqual(spans[0][0]["text"], "One")
+            self.assertEqual(spans[0][-1]["text"], "fifteen")
+            connection.close()
 
     def test_redundant_title_with_leading_dashes_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
