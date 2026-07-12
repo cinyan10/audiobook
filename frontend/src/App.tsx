@@ -891,7 +891,7 @@ function ReaderPage({
     const target = closestReaderToken(range.commonAncestorContainer);
     const paragraph = target?.closest<HTMLElement>(".reader-paragraph");
     if (target && paragraph) {
-      openLookup(word, paragraph.textContent || "", target, target.dataset.cefrLevel || "");
+      openLookup(word, lookupContext(paragraph.textContent || "", word), target, target.dataset.cefrLevel || "");
     }
   };
 
@@ -1773,7 +1773,7 @@ function ReaderPage({
                             setContextMenu({
                               word,
                               rootWord: token.root_text || word.toLowerCase(),
-                              context: sentenceContext(block.paragraph.text, word),
+                              context: lookupContext(block.paragraph.text, word),
                               cefrLevel: token.cefr_level || "",
                               paragraphIndex: block.paragraph.paragraph_index,
                               tokenIndex: token.token_index,
@@ -2075,6 +2075,29 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function selectedWord(text: string): string {
   return text.trim().match(/[A-Za-z]+(?:['-][A-Za-z]+)*/)?.[0] ?? "";
+}
+
+const LOOKUP_CONTEXT_MAX_CHARS = 700;
+
+function lookupContext(text: string, word: string): string {
+  const context = text.split(/\s+/).join(" ").trim();
+  if (!context || context.length <= LOOKUP_CONTEXT_MAX_CHARS) {
+    return context || text;
+  }
+
+  const sentence = sentenceContext(context, word);
+  if (sentence.length <= LOOKUP_CONTEXT_MAX_CHARS) {
+    return sentence;
+  }
+
+  const index = context.toLowerCase().indexOf(word.toLowerCase());
+  if (index < 0) {
+    return context.slice(0, LOOKUP_CONTEXT_MAX_CHARS).trim();
+  }
+
+  const half = Math.floor((LOOKUP_CONTEXT_MAX_CHARS - word.length) / 2);
+  const start = Math.max(0, Math.min(index - half, context.length - LOOKUP_CONTEXT_MAX_CHARS));
+  return context.slice(start, start + LOOKUP_CONTEXT_MAX_CHARS).trim();
 }
 
 function sentenceContext(text: string, word: string): string {
