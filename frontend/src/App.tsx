@@ -189,6 +189,13 @@ type WordlistEntry = {
   original_word: string;
   word_type: string;
   cefr_level: string;
+  definition_number: number | null;
+  definition: string;
+  definition_examples: string[];
+  definition_phonetics: string[];
+  definition_audio_url: string;
+  definition_source_url: string;
+  definition_lookup_error: string;
   context: string;
   paragraph_index: number;
   token_index: number;
@@ -651,9 +658,20 @@ function WordlistPage({ onOpenBook }: { onOpenBook: (bookId: number) => void }) 
                 {entry.root_word}
               </button>
               {entry.word_type || entry.cefr_level ? (
-                <span className="wordlist-meta">{[entry.word_type, entry.cefr_level].filter(Boolean).join(" · ")}</span>
+                <span className="wordlist-meta">{[entry.word_type, entry.cefr_level, entry.definition_phonetics.join("  ")].filter(Boolean).join(" · ")}</span>
               ) : null}
               <p>{highlightContextWord(entry)}</p>
+              {entry.definition ? (
+                <div className="wordlist-definition">
+                  <p>
+                    {entry.definition_number ? <b>Definition {entry.definition_number}. </b> : null}
+                    {entry.definition}
+                  </p>
+                  {entry.definition_examples.map((example) => (
+                    <blockquote key={example}>{example}</blockquote>
+                  ))}
+                </div>
+              ) : null}
             </article>
           ))}
         </div>
@@ -845,10 +863,31 @@ function ReaderPage({
     void audio.play();
   };
 
-  const openLookup = (word: string, context: string, target: HTMLElement, cefrLevel = "") => {
+  const openLookup = (word: string, context: string, target: HTMLElement, cefrLevel = "", rootWord = "") => {
     const bounds = target.getBoundingClientRect();
     const x = Math.min(bounds.left + bounds.width / 2, window.innerWidth - 24);
     const y = Math.min(bounds.bottom + 8, window.innerHeight - 24);
+    const savedEntry = wordlistEntries.find(
+      (entry) => entry.definition && (entry.root_word === rootWord || entry.root_word === word.toLowerCase() || entry.original_word.toLowerCase() === word.toLowerCase()),
+    );
+    if (savedEntry) {
+      setLookupDialog({
+        word,
+        context,
+        cefrLevel,
+        x,
+        y,
+        loading: false,
+        error: null,
+        result: dictionaryLookupFromWordlistEntry(savedEntry, word),
+      });
+      if (savedEntry.definition_audio_url && dictionaryAudioRef.current) {
+        dictionaryAudioRef.current.src = savedEntry.definition_audio_url;
+        void dictionaryAudioRef.current.play();
+      }
+      setContextMenu(null);
+      return;
+    }
     setLookupDialog({ word, context, cefrLevel, x, y, loading: true, error: null, result: null });
     setContextMenu(null);
     void fetch("/api/dictionary/lookup", {
@@ -891,7 +930,7 @@ function ReaderPage({
     const target = closestReaderToken(range.commonAncestorContainer);
     const paragraph = target?.closest<HTMLElement>(".reader-paragraph");
     if (target && paragraph) {
-      openLookup(word, lookupContext(paragraph.textContent || "", word), target, target.dataset.cefrLevel || "");
+      openLookup(word, lookupContext(paragraph.textContent || "", word), target, target.dataset.cefrLevel || "", target.dataset.rootText || "");
     }
   };
 
@@ -899,16 +938,44 @@ function ReaderPage({
     if (!book || !contextMenu) {
       return;
     }
+    const menu = contextMenu;
+    const optimisticEntry: WordlistEntry = {
+      id: -Date.now(),
+      book_id: book.id,
+      book_title: book.title,
+      root_word: menu.rootWord,
+      original_word: menu.word,
+      word_type: "",
+      cefr_level: menu.cefrLevel,
+      definition_number: null,
+      definition: "",
+      definition_examples: [],
+      definition_phonetics: [],
+      definition_audio_url: "",
+      definition_source_url: "",
+      definition_lookup_error: "",
+      context: menu.context,
+      paragraph_index: menu.paragraphIndex,
+      token_index: menu.tokenIndex,
+      created_at: new Date().toISOString(),
+    };
+    setContextMenu(null);
+    setWordlistEntries((current) => [optimisticEntry, ...current.filter((item) => item.root_word !== menu.rootWord)]);
     try {
       const entry = await postWordlistEntry(book.id, {
-        word: contextMenu.word,
-        context: contextMenu.context,
-        paragraphIndex: contextMenu.paragraphIndex,
-        tokenIndex: contextMenu.tokenIndex,
+        word: menu.word,
+        context: menu.context,
+        paragraphIndex: menu.paragraphIndex,
+        tokenIndex: menu.tokenIndex,
       });
-      setWordlistEntries((current) => [entry, ...current.filter((item) => item.id !== entry.id)]);
-      setContextMenu(null);
+      setWordlistEntries((current) => [entry, ...current.filter((item) => item.id !== entry.id && item.id !== optimisticEntry.id)]);
+      void pollWordlistEntry(book.id, entry.id).then((refreshed) => {
+        if (refreshed?.definition) {
+          setWordlistEntries((current) => current.map((item) => (item.id === refreshed.id ? refreshed : item)));
+        }
+      });
     } catch (saveError) {
+      setWordlistEntries((current) => current.filter((item) => item.id !== optimisticEntry.id));
       setError(saveError instanceof Error ? saveError.message : "Failed to add word.");
     }
   };
@@ -1763,6 +1830,7 @@ function ReaderPage({
                           className={readerTokenClassName(token, token.token_index === activeTokenIndex, isWordlistExact, isWordlistRoot)}
                           title={token.oxford_tip || ""}
                           data-cefr-level={token.cefr_level || ""}
+                          data-root-text={token.root_text || ""}
                           onClick={() => seekToToken(token)}
                           onContextMenu={(event) => {
                             const word = selectedWord(token.text);
@@ -1807,7 +1875,7 @@ function ReaderPage({
         ) : null}
         {contextMenu ? (
           <div className="reader-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
-            <button onClick={() => openLookup(contextMenu.word, contextMenu.context, contextMenu.target, contextMenu.cefrLevel)} type="button">
+            <button onClick={() => openLookup(contextMenu.word, contextMenu.context, contextMenu.target, contextMenu.cefrLevel, contextMenu.rootWord)} type="button">
               Look up word
             </button>
             {contextMenuWordIsSaved ? (
@@ -2130,6 +2198,33 @@ function highlightContextWord(entry: WordlistEntry): Array<string | ReactElement
   ];
 }
 
+function dictionaryLookupFromWordlistEntry(entry: WordlistEntry, word: string): DictionaryLookup {
+  return {
+    word: entry.root_word || word,
+    word_type: entry.word_type,
+    cefr_level: entry.cefr_level,
+    phonetics: entry.definition_phonetics,
+    audio_url: entry.definition_audio_url,
+    source_url: entry.definition_source_url,
+    definitions: entry.definition
+      ? [
+          {
+            number: entry.definition_number ?? 1,
+            definition: entry.definition,
+            examples: entry.definition_examples,
+          },
+        ]
+      : [],
+    context_definition: {
+      definition_number: entry.definition_number,
+      definition: entry.definition,
+      examples: entry.definition_examples,
+      ai_explanation: "",
+      matched: Boolean(entry.definition),
+    },
+  };
+}
+
 function cefrLevelClass(level: string | null | undefined): string {
   return level ? `level-${level.toLowerCase()}` : "";
 }
@@ -2256,6 +2351,26 @@ async function postWordlistEntry(
     throw new Error(`Failed to add word (${response.status})`);
   }
   return (await response.json()) as WordlistEntry;
+}
+
+async function pollWordlistEntry(bookId: number, entryId: number): Promise<WordlistEntry | null> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await delay(700);
+    const response = await fetch(`/api/books/${bookId}/wordlist`);
+    if (!response.ok) {
+      return null;
+    }
+    const entries = (await response.json()) as WordlistEntry[];
+    const entry = entries.find((item) => item.id === entryId);
+    if (!entry || entry.definition || entry.definition_lookup_error) {
+      return entry ?? null;
+    }
+  }
+  return null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function deleteWordlistEntry(bookId: number, paragraphIndex: number, tokenIndex: number): Promise<void> {

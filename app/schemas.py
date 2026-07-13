@@ -200,6 +200,13 @@ class WordlistEntry(BaseModel):
     original_word: str
     word_type: str = ""
     cefr_level: str = ""
+    definition_number: int | None = None
+    definition: str = ""
+    definition_examples: list[str] = Field(default_factory=list)
+    definition_phonetics: list[str] = Field(default_factory=list)
+    definition_audio_url: str = ""
+    definition_source_url: str = ""
+    definition_lookup_error: str = ""
     context: str
     paragraph_index: int
     token_index: int

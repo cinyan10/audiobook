@@ -1457,10 +1457,28 @@ code {
 
 .wordlist-entry p {
   grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-row: 1;
   margin: 0;
   color: #2d231b;
   line-height: 1.55;
+}
+
+.wordlist-definition {
+  grid-column: 2;
+  grid-row: 2;
+  color: #473a30;
+  font-size: 0.94rem;
+}
+
+.wordlist-definition p {
+  margin: 0.25rem 0 0;
+}
+
+.wordlist-definition blockquote {
+  margin: 0.35rem 0 0;
+  padding-left: 0.8rem;
+  border-left: 2px solid rgba(82, 57, 35, 0.18);
+  color: rgba(71, 58, 48, 0.72);
 }
 
 @keyframes shelf-enter {
@@ -1500,7 +1518,8 @@ code {
   }
 
   .wordlist-meta,
-  .wordlist-entry p {
+  .wordlist-entry p,
+  .wordlist-definition {
     grid-column: auto;
     grid-row: auto;
   }

@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS wordlist_entries (
     original_word TEXT NOT NULL,
     word_type TEXT NOT NULL DEFAULT '',
     cefr_level TEXT NOT NULL DEFAULT '',
+    definition_number INTEGER,
+    definition TEXT NOT NULL DEFAULT '',
+    definition_examples TEXT NOT NULL DEFAULT '[]',
+    definition_phonetics TEXT NOT NULL DEFAULT '[]',
+    definition_audio_url TEXT NOT NULL DEFAULT '',
+    definition_source_url TEXT NOT NULL DEFAULT '',
+    definition_lookup_error TEXT NOT NULL DEFAULT '',
     context TEXT NOT NULL,
     paragraph_index INTEGER NOT NULL,
     token_index INTEGER NOT NULL,
@@ -139,6 +146,20 @@ def init_db(db_path: Path = DB_PATH) -> None:
             connection.execute("ALTER TABLE wordlist_entries ADD COLUMN word_type TEXT NOT NULL DEFAULT ''")
         if "cefr_level" not in wordlist_columns:
             connection.execute("ALTER TABLE wordlist_entries ADD COLUMN cefr_level TEXT NOT NULL DEFAULT ''")
+        if "definition_number" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_number INTEGER")
+        if "definition" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition TEXT NOT NULL DEFAULT ''")
+        if "definition_examples" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_examples TEXT NOT NULL DEFAULT '[]'")
+        if "definition_phonetics" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_phonetics TEXT NOT NULL DEFAULT '[]'")
+        if "definition_audio_url" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_audio_url TEXT NOT NULL DEFAULT ''")
+        if "definition_source_url" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_source_url TEXT NOT NULL DEFAULT ''")
+        if "definition_lookup_error" not in wordlist_columns:
+            connection.execute("ALTER TABLE wordlist_entries ADD COLUMN definition_lookup_error TEXT NOT NULL DEFAULT ''")
         from app.words import root_word
 
         rows = connection.execute("SELECT id, normalized_text FROM book_tokens WHERE root_text = '' AND normalized_text != ''").fetchall()

@@ -11,7 +11,7 @@ from app.db import connect, init_db
 from app.alignment import map_transcript_to_tokens
 from app.audio_generation import missing_alignment_spans
 from app.cefr import fetch_indexed_paragraph_tokens, fetch_paragraph_tokens
-from app.library import chapter_heading_paragraphs_to_skip, delete_wordlist_entry, enrich_book_part_cefr, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
+from app.library import chapter_heading_paragraphs_to_skip, delete_wordlist_entry, enrich_book_part_cefr, enrich_wordlist_entry_definition, get_book_part_alignment_payload, get_book_part_audio_path, get_cefr_job_status, get_chapter_payload, get_reader_payload, import_book, list_wordlist_entries, next_pending_cefr_part, part_alignment_path, recover_interrupted_cefr_jobs, save_progress, save_wordlist_entry, scan_books_directory, start_cefr_job
 from app.words import root_word
 
 
@@ -178,16 +178,79 @@ class Phase1ImportTests(unittest.TestCase):
             self.assertEqual(entry["root_word"], "worry")
             self.assertEqual(entry["word_type"], "verb")
             self.assertEqual(entry["cefr_level"], "B1")
+            self.assertEqual(entry["definition"], "")
             self.assertEqual(entry["context"], "She was worried about the test.")
-            duplicate = save_wordlist_entry(connection, book_id, "worried", "Changed context.", 0, int(token["token_index"]))
+            with patch(
+                "app.library.lookup_word",
+                return_value={
+                    "word_type": "verb",
+                    "cefr_level": "B1",
+                    "phonetics": ["/wɜːri/"],
+                    "audio_url": "https://example.com/worry.mp3",
+                    "source_url": "https://example.com/worry",
+                    "context_definition": {
+                        "definition_number": 1,
+                        "definition": "to keep thinking about unpleasant things",
+                        "examples": ["Don't worry about the test."],
+                    },
+                },
+            ):
+                enrich_wordlist_entry_definition(int(entry["id"]), db_path)
+            enriched = list_wordlist_entries(connection)[0]
+            self.assertEqual(enriched["definition_number"], 1)
+            self.assertEqual(enriched["definition"], "to keep thinking about unpleasant things")
+            self.assertEqual(enriched["definition_examples"], ["Don't worry about the test."])
+            self.assertEqual(enriched["definition_phonetics"], ["/wɜːri/"])
+            self.assertEqual(enriched["definition_audio_url"], "https://example.com/worry.mp3")
+            self.assertEqual(enriched["definition_source_url"], "https://example.com/worry")
+            with patch("app.library.lookup_word", side_effect=RuntimeError("offline")):
+                duplicate = save_wordlist_entry(connection, book_id, "worried", "Changed context.", 0, int(token["token_index"]))
             self.assertEqual(duplicate["id"], entry["id"])
             entries = list_wordlist_entries(connection)
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["book_title"], "Test Book")
+            self.assertEqual(entries[0]["definition"], "to keep thinking about unpleasant things")
             self.assertEqual(entries[0]["context"], "She was worried about the test.")
             removed = delete_wordlist_entry(connection, book_id, 0, int(token["token_index"]))
             self.assertTrue(removed)
             self.assertEqual(list_wordlist_entries(connection), [])
+            connection.close()
+
+    def test_wordlist_still_saves_when_definition_lookup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            books_dir = root / "books"
+            books_dir.mkdir()
+            epub_path = books_dir / "test-book.epub"
+            self._write_epub(epub_path, """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>She pondered the question.</p>
+</body></html>
+""")
+
+            db_path = root / "reader.sqlite3"
+            init_db(db_path)
+            connection = connect(db_path)
+            summary, _ = import_book(connection, epub_path)
+            book_id = int(summary["id"])
+            chapter_payload = get_chapter_payload(connection, book_id, 0)
+            assert chapter_payload is not None
+            token = next(
+                token
+                for token in chapter_payload["blocks"][0]["paragraph"]["tokens"]
+                if token["normalized_text"] == "pondered"
+            )
+
+            entry = save_wordlist_entry(connection, book_id, "pondered", "She pondered the question.", 0, int(token["token_index"]))
+            with patch("app.library.lookup_word", side_effect=RuntimeError("offline")):
+                enrich_wordlist_entry_definition(int(entry["id"]), db_path)
+            entry = list_wordlist_entries(connection)[0]
+
+            self.assertEqual(entry["root_word"], "pondered")
+            self.assertEqual(entry["definition"], "")
+            self.assertEqual(entry["definition_examples"], [])
+            self.assertEqual(entry["definition_phonetics"], [])
+            self.assertEqual(entry["definition_audio_url"], "")
+            self.assertEqual(entry["definition_lookup_error"], "offline")
             connection.close()
 
     def test_fetch_paragraph_tokens_aligns_normalized_oxford_output(self) -> None:

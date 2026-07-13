@@ -9,6 +9,8 @@ import re
 from urllib.parse import quote, unquote
 
 from app.cefr import MAX_CEFR_CHARS, cancel_cefr_fetch, fetch_paragraph_tokens, normalize_text, plain_tokens
+from app.db import DB_PATH, connect
+from app.dictionary import lookup_word
 from app.epub import read_epub, read_epub_asset, read_epub_chapter_blocks, slugify
 from app.words import root_word
 
@@ -1167,6 +1169,13 @@ def list_wordlist_entries(connection: sqlite3.Connection, book_id: int | None = 
             w.original_word,
             w.word_type,
             COALESCE(NULLIF(w.cefr_level, ''), t.cefr_level, '') AS cefr_level,
+            w.definition_number,
+            w.definition,
+            w.definition_examples,
+            w.definition_phonetics,
+            w.definition_audio_url,
+            w.definition_source_url,
+            w.definition_lookup_error,
             t.oxford_tip,
             w.context,
             w.paragraph_index,
@@ -1210,10 +1219,27 @@ def save_wordlist_entry(
     connection.execute(
         """
         INSERT OR IGNORE INTO wordlist_entries (
-            book_id, root_word, original_word, word_type, cefr_level, context, paragraph_index, token_index, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            book_id, root_word, original_word, word_type, cefr_level,
+            definition_number, definition, definition_examples, definition_source_url, definition_lookup_error,
+            context, paragraph_index, token_index, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (book_id, root, word, word_type, cefr_level, stored_context, paragraph_index, token_index, now_iso()),
+        (
+            book_id,
+            root,
+            word,
+            word_type,
+            cefr_level,
+            None,
+            "",
+            "[]",
+            "",
+            "",
+            stored_context,
+            paragraph_index,
+            token_index,
+            now_iso(),
+        ),
     )
     connection.commit()
     row = connection.execute(
@@ -1226,6 +1252,13 @@ def save_wordlist_entry(
             w.original_word,
             w.word_type,
             COALESCE(NULLIF(w.cefr_level, ''), t.cefr_level, '') AS cefr_level,
+            w.definition_number,
+            w.definition,
+            w.definition_examples,
+            w.definition_phonetics,
+            w.definition_audio_url,
+            w.definition_source_url,
+            w.definition_lookup_error,
             t.oxford_tip,
             w.context,
             w.paragraph_index,
@@ -1327,6 +1360,18 @@ def summarize_book_values(row: sqlite3.Row) -> dict[str, object]:
 
 
 def wordlist_entry_values(row: sqlite3.Row) -> dict[str, object]:
+    try:
+        examples = json.loads(str(row["definition_examples"] or "[]"))
+    except json.JSONDecodeError:
+        examples = []
+    if not isinstance(examples, list):
+        examples = []
+    try:
+        phonetics = json.loads(str(row["definition_phonetics"] or "[]"))
+    except json.JSONDecodeError:
+        phonetics = []
+    if not isinstance(phonetics, list):
+        phonetics = []
     return {
         "id": int(row["id"]),
         "book_id": int(row["book_id"]),
@@ -1335,6 +1380,13 @@ def wordlist_entry_values(row: sqlite3.Row) -> dict[str, object]:
         "original_word": row["original_word"],
         "word_type": row["word_type"] or word_type_from_oxford_tip(str(row["oxford_tip"] or "")),
         "cefr_level": row["cefr_level"],
+        "definition_number": row["definition_number"],
+        "definition": row["definition"],
+        "definition_examples": [str(example) for example in examples],
+        "definition_phonetics": [str(phonetic) for phonetic in phonetics],
+        "definition_audio_url": row["definition_audio_url"],
+        "definition_source_url": row["definition_source_url"],
+        "definition_lookup_error": row["definition_lookup_error"],
         "context": row["context"],
         "paragraph_index": int(row["paragraph_index"]),
         "token_index": int(row["token_index"]),
@@ -1346,6 +1398,81 @@ def wordlist_entry_with_context(connection: sqlite3.Connection, row: sqlite3.Row
     entry = wordlist_entry_values(row)
     entry["context"] = token_sentence_context(connection, int(row["book_id"]), int(row["paragraph_index"]), int(row["token_index"])) or entry["context"]
     return entry
+
+
+def lookup_wordlist_definition(word: str, context: str, cefr_level: str) -> dict[str, object]:
+    try:
+        result = lookup_word(word, context, cefr_level)
+        choice = result.get("context_definition") or {}
+        examples = choice.get("examples") or []
+        phonetics = result.get("phonetics") or []
+        return {
+            "word_type": str(result.get("word_type") or ""),
+            "cefr_level": str(result.get("cefr_level") or ""),
+            "definition_number": choice.get("definition_number"),
+            "definition": str(choice.get("definition") or ""),
+            "examples": examples if isinstance(examples, list) else [],
+            "phonetics": phonetics if isinstance(phonetics, list) else [],
+            "audio_url": str(result.get("audio_url") or ""),
+            "source_url": str(result.get("source_url") or ""),
+            "lookup_error": "",
+        }
+    except Exception as exc:
+        return {
+            "word_type": "",
+            "cefr_level": "",
+            "definition_number": None,
+            "definition": "",
+            "examples": [],
+            "phonetics": [],
+            "audio_url": "",
+            "source_url": "",
+            "lookup_error": str(exc),
+        }
+
+
+def enrich_wordlist_entry_definition(entry_id: int, db_path: Path = DB_PATH) -> None:
+    with connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT id, root_word, context, cefr_level, definition
+            FROM wordlist_entries
+            WHERE id = ?
+            """,
+            (entry_id,),
+        ).fetchone()
+        if not row or row["definition"]:
+            return
+        definition = lookup_wordlist_definition(str(row["root_word"]), str(row["context"]), str(row["cefr_level"] or ""))
+        connection.execute(
+            """
+            UPDATE wordlist_entries
+            SET
+                word_type = COALESCE(NULLIF(?, ''), word_type),
+                cefr_level = COALESCE(NULLIF(?, ''), cefr_level),
+                definition_number = ?,
+                definition = ?,
+                definition_examples = ?,
+                definition_phonetics = ?,
+                definition_audio_url = ?,
+                definition_source_url = ?,
+                definition_lookup_error = ?
+            WHERE id = ?
+            """,
+            (
+                definition["word_type"],
+                definition["cefr_level"],
+                definition["definition_number"],
+                definition["definition"],
+                json.dumps(definition["examples"], ensure_ascii=True),
+                json.dumps(definition["phonetics"], ensure_ascii=True),
+                definition["audio_url"],
+                definition["source_url"],
+                definition["lookup_error"],
+                entry_id,
+            ),
+        )
+        connection.commit()
 
 
 def token_sentence_context(connection: sqlite3.Connection, book_id: int, paragraph_index: int, token_index: int) -> str:
