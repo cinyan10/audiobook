@@ -13,11 +13,20 @@ pub struct BookSummary {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ChapterPartSummary {
+    pub part_index: i64,
+    pub title: String,
+    pub start_block_index: i64,
+    pub end_block_index: i64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChapterSummary {
     pub chapter_index: i64,
     pub title: String,
     pub start_block_index: i64,
     pub end_block_index: i64,
+    pub parts: Vec<ChapterPartSummary>,
 }
 
 #[derive(Debug, Serialize)]

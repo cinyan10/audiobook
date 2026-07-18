@@ -9,11 +9,19 @@ export type BookSummary = {
   updated_at: string;
 };
 
+export type ChapterPartSummary = {
+  part_index: number;
+  title: string;
+  start_block_index: number;
+  end_block_index: number;
+};
+
 export type ChapterSummary = {
   chapter_index: number;
   title: string;
   start_block_index: number;
   end_block_index: number;
+  parts: ChapterPartSummary[];
 };
 
 export type ReadingProgress = {

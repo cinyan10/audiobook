@@ -246,27 +246,106 @@ svg {
   top: 4rem;
   height: calc(100vh - 4rem);
   border-right: 1px solid hsl(var(--border));
-  background: hsl(var(--background) / 0.72);
+  background: hsl(var(--background) / 0.82);
+}
+
+.toc-group {
+  display: grid;
+  gap: 0.18rem;
 }
 
 .toc-item {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
   width: 100%;
-  overflow: hidden;
   border: 0;
-  border-radius: calc(var(--radius) - 2px);
+  border-left: 1px solid hsl(var(--border));
+  border-radius: 0;
   background: transparent;
-  padding: 0.55rem 0.65rem;
+  padding: 0.36rem 0 0.36rem 0.8rem;
   color: hsl(var(--muted-foreground));
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
 }
 
-.toc-item:hover,
+.toc-title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.95rem;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toc-count {
+  display: inline-flex;
+  min-width: 1.45rem;
+  height: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.toc-item:hover {
+  border-left-color: hsl(var(--primary) / 0.42);
+  color: hsl(var(--foreground));
+  transform: translateX(2px);
+}
+
 .toc-item.active {
+  border-left-color: hsl(var(--primary));
+  color: hsl(var(--accent-foreground));
+}
+
+.toc-item.active .toc-count {
   background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+}
+
+.toc-parts {
+  display: grid;
+  gap: 0.12rem;
+  padding-left: 1.15rem;
+}
+
+.toc-part {
+  width: 100%;
+  border: 0;
+  border-left: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 0;
+  background: transparent;
+  padding: 0.2rem 0 0.2rem 0.75rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.toc-part:hover {
+  border-left-color: hsl(var(--primary) / 0.34);
+  color: hsl(var(--foreground));
+  transform: translateX(2px);
+}
+
+.toc-part.active {
+  border-left-color: hsl(var(--primary) / 0.72);
   color: hsl(var(--accent-foreground));
 }
 
@@ -295,6 +374,29 @@ svg {
   font-size: clamp(2rem, 5vw, 4rem);
   font-weight: 500;
   line-height: 1.05;
+}
+
+.reader-heading span {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.part-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.part-stats span {
+  display: inline-flex;
+  align-items: center;
+  border-left: 1px solid hsl(var(--border));
+  padding-left: 0.6rem;
 }
 
 .reader-text {

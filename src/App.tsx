@@ -224,10 +224,12 @@ function ReaderView({
   const [reader, setReader] = useState<ReaderPayload | null>(null);
   const [chapter, setChapter] = useState<ChapterPayload | null>(null);
   const [chapterIndex, setChapterIndex] = useState(initialChapterIndex ?? 0);
+  const [partIndex, setPartIndex] = useState(0);
   const [tocOpen, setTocOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const pendingPartBlockRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,7 +240,17 @@ function ReaderView({
           return;
         }
         setReader(payload);
-        setChapterIndex(initialChapterIndex ?? payload.progress.last_chapter_index ?? 0);
+        const savedChapterIndex = initialChapterIndex ?? payload.progress.last_chapter_index ?? 0;
+        const nextChapterIndex = payload.chapters.some((item) => item.chapter_index === savedChapterIndex) ? savedChapterIndex : 0;
+        const nextChapter = payload.chapters.find((item) => item.chapter_index === nextChapterIndex);
+        const nextPartIndex =
+          nextChapter?.parts.find(
+            (part) =>
+              payload.progress.last_block_index >= part.start_block_index &&
+              payload.progress.last_block_index <= part.end_block_index,
+          )?.part_index ?? 0;
+        setChapterIndex(nextChapterIndex);
+        setPartIndex(nextPartIndex);
       })
       .catch((error) => toast.error(errorMessage(error, "Failed to open book.")))
       .finally(() => {
@@ -270,8 +282,11 @@ function ReaderView({
     if (!reader || !chapter) {
       return;
     }
-    const target = chapter.blocks.find((block) => block.block_index >= reader.progress.last_block_index);
-    if (target && chapterIndex === reader.progress.last_chapter_index) {
+    const pendingPartBlock = pendingPartBlockRef.current;
+    pendingPartBlockRef.current = null;
+    const partTarget = pendingPartBlock === null ? null : chapter.blocks.find((block) => block.block_index >= pendingPartBlock);
+    const target = partTarget ?? chapter.blocks.find((block) => block.block_index >= reader.progress.last_block_index);
+    if (target && (partTarget || chapterIndex === reader.progress.last_chapter_index)) {
       window.requestAnimationFrame(() => {
         document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
       });
@@ -317,12 +332,42 @@ function ReaderView({
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [bookId, chapter, chapterIndex, reader]);
+  }, [bookId, chapter, chapterIndex, partIndex, reader]);
 
   const activeChapter = useMemo(
     () => reader?.chapters.find((item) => item.chapter_index === chapterIndex),
     [chapterIndex, reader],
   );
+  const activePart = useMemo(
+    () => activeChapter?.parts.find((item) => item.part_index === partIndex),
+    [activeChapter, partIndex],
+  );
+  const visibleBlocks = useMemo(() => {
+    if (!chapter) {
+      return [];
+    }
+    if (!activePart || !activeChapter || activeChapter.parts.length <= 1) {
+      return chapter.blocks;
+    }
+    return chapter.blocks.filter(
+      (block) => block.block_index >= activePart.start_block_index && block.block_index <= activePart.end_block_index,
+    );
+  }, [activeChapter, activePart, chapter]);
+  const partWordCount = useMemo(
+    () => visibleBlocks.reduce((total, block) => total + countWords(block.text), 0),
+    [visibleBlocks],
+  );
+
+  const selectChapter = useCallback((nextChapterIndex: number, nextPartIndex = 0, startBlockIndex?: number) => {
+    pendingPartBlockRef.current = startBlockIndex ?? null;
+    setPartIndex(nextPartIndex);
+    setChapterIndex(nextChapterIndex);
+    if (nextChapterIndex === chapterIndex && startBlockIndex !== undefined) {
+      window.requestAnimationFrame(() => {
+        document.getElementById(blockDomId(startBlockIndex))?.scrollIntoView({ block: "center" });
+      });
+    }
+  }, [chapterIndex]);
 
   return (
     <TooltipProvider>
@@ -357,14 +402,30 @@ function ReaderView({
                 <div className="flex flex-col gap-2 p-4">
                   <p className="px-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Chapters</p>
                   {reader?.chapters.map((item) => (
-                    <button
-                      key={item.chapter_index}
-                      className={cn("toc-item", item.chapter_index === chapterIndex && "active")}
-                      type="button"
-                      onClick={() => setChapterIndex(item.chapter_index)}
-                    >
-                      {item.title}
-                    </button>
+                    <div key={item.chapter_index} className="toc-group">
+                      <button
+                        className={cn("toc-item", item.chapter_index === chapterIndex && "active")}
+                        type="button"
+                        onClick={() => selectChapter(item.chapter_index, 0, item.start_block_index)}
+                      >
+                        <span className="toc-title">{formatChapterTitle(item.title)}</span>
+                        {item.parts.length > 1 ? <span className="toc-count">{item.parts.length}</span> : null}
+                      </button>
+                      {item.chapter_index === chapterIndex && item.parts.length > 1 ? (
+                        <div className="toc-parts" aria-label={`${item.title} parts`}>
+                          {item.parts.map((part) => (
+                            <button
+                              key={part.part_index}
+                              className={cn("toc-part", part.part_index === partIndex && "active")}
+                              type="button"
+                              onClick={() => selectChapter(item.chapter_index, part.part_index, part.start_block_index)}
+                            >
+                              {part.title}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
               </ScrollArea>
@@ -377,12 +438,15 @@ function ReaderView({
             ) : (
               <>
                 <div className="reader-heading">
-                  <p>{reader.author || "Unknown author"}</p>
                   <h2>{chapter.title}</h2>
+                  {activePart && activeChapter && activeChapter.parts.length > 1 ? <span>{activePart.title}</span> : null}
+                  <div className="part-stats" aria-label="Part statistics">
+                    <span>{partWordCount.toLocaleString()} words</span>
+                  </div>
                 </div>
                 <Separator />
                 <div className="reader-text">
-                  {chapter.blocks.map((block) =>
+                  {visibleBlocks.map((block) =>
                     block.kind === "paragraph" ? (
                       <p
                         key={block.block_index}
@@ -440,6 +504,14 @@ function initials(title: string) {
 
 function blockDomId(blockIndex: number) {
   return `reader-block-${blockIndex}`;
+}
+
+function formatChapterTitle(title: string) {
+  return title.replace(/^(\d+)\s+/, "$1 ");
+}
+
+function countWords(text: string) {
+  return text.match(/[\p{L}\p{N}]+(?:['’.-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
 }
 
 function errorMessage(error: unknown, fallback: string) {

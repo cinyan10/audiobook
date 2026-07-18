@@ -27,7 +27,16 @@ pub struct ExtractedChapter {
 }
 
 pub struct ExtractedBlock {
+    pub kind: ExtractedBlockKind,
     pub text: String,
+    pub asset_path: Option<String>,
+    pub alt: String,
+}
+
+#[derive(Clone, Copy)]
+pub enum ExtractedBlockKind {
+    Paragraph,
+    Image,
 }
 
 #[derive(Clone)]
@@ -100,6 +109,15 @@ pub fn read_epub(path: &Path) -> Result<ExtractedBook> {
     })
 }
 
+pub fn read_chapter_blocks(path: &Path, source_href: &str) -> Result<Vec<ExtractedBlock>> {
+    let file = File::open(path)?;
+    let mut zip = ZipArchive::new(file)?;
+    let zip_path = find_zip_entry(&mut zip, source_href)
+        .ok_or_else(|| anyhow!("Unable to find chapter {source_href} in EPUB."))?;
+    let content = read_zip_text(&mut zip, &zip_path)?;
+    Ok(parse_chapter_blocks(&content))
+}
+
 fn read_zip_text(zip: &mut ZipArchive<File>, path: &str) -> Result<String> {
     let mut file = zip.by_name(path)?;
     let mut content = String::new();
@@ -112,6 +130,16 @@ fn read_zip_bytes(zip: &mut ZipArchive<File>, path: &str) -> Result<Vec<u8>> {
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;
     Ok(content)
+}
+
+fn find_zip_entry(zip: &mut ZipArchive<File>, source_href: &str) -> Option<String> {
+    let normalized = normalize_zip_path(source_href);
+    zip.file_names()
+        .find(|path| {
+            let candidate = normalize_zip_path(path);
+            candidate == normalized || candidate.ends_with(&format!("/{normalized}"))
+        })
+        .map(ToString::to_string)
 }
 
 fn metadata_text(doc: &Document<'_>, name: &str) -> Option<String> {
@@ -199,25 +227,45 @@ fn find_cover(
 
 fn parse_chapter_blocks(content: &str) -> Vec<ExtractedBlock> {
     let document = Html::parse_document(content);
-    let selector = Selector::parse("p, div, li, h1, h2, h3, h4").expect("valid paragraph selector");
+    let selector = Selector::parse("p, div, li, h1, h2, h3, h4, img").expect("valid chapter block selector");
     document
         .select(&selector)
         .filter(|element| !is_redundant_container(element))
-        .filter_map(|element| normalize_text(&element.text().collect::<Vec<_>>().join(" ")))
-        .map(|text| ExtractedBlock { text })
+        .filter_map(parse_chapter_block)
         .collect()
+}
+
+fn parse_chapter_block(element: ElementRef<'_>) -> Option<ExtractedBlock> {
+    if element.value().name() == "img" {
+        let source = element.value().attr("src")?;
+        return Some(ExtractedBlock {
+            kind: ExtractedBlockKind::Image,
+            text: String::new(),
+            asset_path: Some(normalize_zip_path(source)),
+            alt: element.value().attr("alt").unwrap_or_default().trim().to_string(),
+        });
+    }
+
+    normalize_text(&element.text().collect::<Vec<_>>().join(" ")).map(|text| ExtractedBlock {
+        kind: ExtractedBlockKind::Paragraph,
+        text,
+        asset_path: None,
+        alt: String::new(),
+    })
 }
 
 fn is_redundant_container(element: &ElementRef<'_>) -> bool {
     if element.value().name() != "div" {
         return false;
     }
+    has_readable_descendant(element)
+}
+
+fn has_readable_descendant(element: &ElementRef<'_>) -> bool {
     element.children().any(|child| {
         ElementRef::wrap(child).is_some_and(|child_element| {
-            matches!(
-                child_element.value().name(),
-                "p" | "li" | "h1" | "h2" | "h3" | "h4"
-            )
+            matches!(child_element.value().name(), "p" | "li" | "h1" | "h2" | "h3" | "h4" | "img")
+                || has_readable_descendant(&child_element)
         })
     })
 }
@@ -323,5 +371,18 @@ mod tests {
         );
         let texts = blocks.into_iter().map(|block| block.text).collect::<Vec<_>>();
         assert_eq!(texts, vec!["First paragraph.", "Second paragraph.", "Loose paragraph in a div."]);
+    }
+
+    #[test]
+    fn skips_deep_wrapper_divs_around_chapter_content() {
+        let blocks = parse_chapter_blocks(
+            r#"
+            <html><body>
+              <div class="galley"><section><h1>4</h1><p>First paragraph.</p><p>Second paragraph.</p></section></div>
+            </body></html>
+            "#,
+        );
+        let texts = blocks.into_iter().map(|block| block.text).collect::<Vec<_>>();
+        assert_eq!(texts, vec!["4", "First paragraph.", "Second paragraph."]);
     }
 }
