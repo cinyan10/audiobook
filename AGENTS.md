@@ -1,38 +1,36 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a small Python-first prototype for audiobook generation and reader experiments.
+This repository currently preserves the pre-rewrite audiobook reader project under `legacy/`.
 
-- `gemini_audiobook.py`: EPUB text extraction, chunking, and Gemini TTS audio generation.
-- `oxford_cefr.py`: Oxford Text Checker scraping via `playwright-cli`, plus HTML/JSON CEFR output.
+- `legacy/python/`: preserved Python prototype, FastAPI backend, scripts, tests, and sample artifacts.
+- `legacy/frontend/`: preserved React + Vite web reader UI.
 - `data/books/`: local source `.epub` files, ignored by Git.
 - `data/audio/`: local generated audiobook assets and chunked WAV files, ignored by Git.
-- `sample-cefr-reader.html` and `sample-cefr-reader.json`: example output artifacts.
-- `PRD-web-book-reader.md` and `tech-stack.md`: product and architecture notes.
 
-Keep new code near the script or data flow it belongs to, but do not grow one file into a catch-all. Prefer small focused modules over a monolith, for example `epub_parser.py`, `audio_pipeline.py`, or `cefr_renderer.py` when responsibilities split cleanly.
+Keep archived code intact unless the task is explicitly about maintaining or extracting behavior from the legacy implementation.
 
 ## Build, Test, and Development Commands
-Use plain Python entrypoints from the repo root.
+Run archived commands from their new legacy directories.
 
-- `python3 gemini_audiobook.py --self-check`
+- `cd legacy/frontend && bun install`
+  Installs frontend dependencies.
+- `cd legacy/frontend && bun run dev`
+  Runs the Vite frontend only.
+- `cd legacy/frontend && bun run build`
+  Builds the frontend.
+- `cd legacy/python && python3 gemini_audiobook.py --self-check`
   Runs the built-in chunking/audio sanity check.
-- `python3 oxford_cefr.py --self-check`
+- `cd legacy/python && python3 oxford_cefr.py --self-check`
   Verifies the CEFR HTML renderer without hitting Oxford.
-- `python3 oxford_cefr.py my-youth-comedy.txt --output cefr-reader.html --json-output cefr-reader.json`
+- `cd legacy/python && python3 oxford_cefr.py my-youth-comedy.txt --output cefr-reader.html --json-output cefr-reader.json`
   Builds a local CEFR reader from a text file.
-- `python3 gemini_audiobook.py --help`
-  Shows the current audiobook pipeline options.
-
-If you add new automation, keep it scriptable from the command line with `argparse`.
 
 ## Coding Style & Naming Conventions
-Follow the existing Python style:
+Follow the existing style for each app layer:
 
-- 4-space indentation, type hints where useful, and standard-library-first solutions.
-- `snake_case` for functions, variables, and file names.
-- Small focused helpers over large classes.
-- Favor multiple cohesive files with one clear responsibility each.
+- TypeScript/React in `legacy/frontend/`, matching the current Vite app style.
+- Python in `legacy/python/`, preserving 4-space indentation, type hints where useful, and standard-library-first solutions.
 - Avoid a single giant script that mixes parsing, API calls, rendering, and persistence.
 - Keep comments rare and practical; explain only non-obvious behavior.
 
@@ -41,7 +39,8 @@ There is no formatter config yet, so match the surrounding file style exactly.
 ## Testing Guidelines
 There is no formal test suite yet. For non-trivial logic, add the smallest runnable check that proves the behavior:
 
-- Prefer `--self-check` for script-level validation.
+- Prefer frontend build checks for UI changes.
+- Prefer `--self-check` for legacy Python script validation.
 - If a standalone test file becomes necessary, use `test_*.py`.
 - Keep tests deterministic and avoid network calls unless the change is specifically about integrations.
 
@@ -52,7 +51,7 @@ Pull requests should include:
 
 - a brief summary of the user-visible or pipeline change
 - any new command needed to run or verify it
-- sample output paths when artifacts change, such as `data/audio/...` or `sample-cefr-reader.html`
+- sample output paths when artifacts change, such as `data/audio/...`
 
 ## Security & Configuration Tips
 Do not commit `.env`. Keep API keys local, and read them from environment variables. Generated audio can be large, so avoid committing temporary artifacts unless they are intentional fixtures or examples.
