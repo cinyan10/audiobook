@@ -9,7 +9,6 @@ import type { BookSummary, ChapterPayload, ReaderPayload } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -167,9 +166,10 @@ function LibraryView({
 
 function BookTile({ book, onOpen }: { book: BookSummary; onOpen: () => void }) {
   const coverSrc = book.cover_asset_path ? convertFileSrc(book.cover_asset_path) : null;
+  const progress = Math.round(book.progress_percent);
   return (
     <article className="book-tile">
-      <button className="book-open" type="button" onClick={onOpen}>
+      <button className="book-open" type="button" onClick={onOpen} aria-label={`Open ${book.title}`}>
         <div className="cover-frame">
           {coverSrc ? (
             <img src={coverSrc} alt="" className="cover-image" />
@@ -180,18 +180,35 @@ function BookTile({ book, onOpen }: { book: BookSummary; onOpen: () => void }) {
             </div>
           )}
         </div>
-        <div className="flex min-w-0 flex-1 flex-col gap-3 text-left">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold leading-5">{book.title}</h2>
-            <p className="truncate text-xs text-muted-foreground">{book.author || "Unknown author"}</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Progress value={book.progress_percent} className="h-1.5" />
-            <Badge variant={book.last_read_at ? "secondary" : "outline"}>{book.last_read_at ? `${Math.round(book.progress_percent)}%` : "New"}</Badge>
-          </div>
-        </div>
+        <span className="cover-title" aria-hidden="true">
+          {book.title}
+        </span>
       </button>
+      <div className="book-progress" aria-label={`${progress}% read`}>
+        <ProgressRing percent={book.progress_percent} />
+        <span>{progress}%</span>
+      </div>
     </article>
+  );
+}
+
+function ProgressRing({ percent }: { percent: number }) {
+  const radius = 18;
+  const circumference = 2 * Math.PI * radius;
+  const clampedPercent = Math.max(0, Math.min(100, percent));
+  const offset = circumference * (1 - clampedPercent / 100);
+
+  return (
+    <svg className="progress-ring" viewBox="0 0 48 48" aria-hidden="true">
+      <circle className="progress-ring-track" cx="24" cy="24" r={radius} />
+      <circle
+        className="progress-ring-fill"
+        cx="24"
+        cy="24"
+        r={radius}
+        style={{ strokeDasharray: circumference, strokeDashoffset: offset }}
+      />
+    </svg>
   );
 }
 
@@ -391,13 +408,9 @@ function LibrarySkeleton() {
   return (
     <div className="library-grid">
       {Array.from({ length: 6 }).map((_, index) => (
-        <div key={index} className="book-tile p-3">
-          <Skeleton className="size-24 shrink-0" />
-          <div className="flex flex-1 flex-col gap-3">
-            <Skeleton className="h-4 w-4/5" />
-            <Skeleton className="h-3 w-2/5" />
-            <Skeleton className="mt-auto h-2 w-full" />
-          </div>
+        <div key={index} className="book-tile">
+          <Skeleton className="shelf-skeleton-cover" />
+          <Skeleton className="shelf-skeleton-progress" />
         </div>
       ))}
     </div>

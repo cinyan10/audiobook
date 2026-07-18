@@ -75,52 +75,68 @@ svg {
 
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+  gap: 2.25rem 1.75rem;
+  align-items: start;
 }
 
 .book-tile {
-  border: 1px solid hsl(var(--border));
-  border-radius: var(--radius);
-  background: hsl(var(--card));
-  box-shadow: 0 1px 0 hsl(var(--foreground) / 0.04);
-  transition:
-    border-color 160ms ease,
-    transform 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.book-tile:hover {
-  border-color: hsl(var(--primary) / 0.35);
-  box-shadow: 0 10px 32px hsl(var(--foreground) / 0.08);
-  transform: translateY(-1px);
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  min-width: 0;
 }
 
 .book-open {
-  display: flex;
+  position: relative;
+  display: block;
   width: 100%;
-  min-width: 0;
-  align-items: stretch;
-  gap: 0.875rem;
+  max-width: 10.75rem;
   border: 0;
   background: transparent;
-  padding: 0.75rem;
+  padding: 0;
   color: inherit;
   cursor: pointer;
 }
 
 .cover-frame {
   position: relative;
-  width: 5.75rem;
   aspect-ratio: 2 / 3;
-  flex: none;
   overflow: hidden;
-  border-radius: calc(var(--radius) - 2px);
+  border-radius: calc(var(--radius) - 1px);
   border: 1px solid hsl(var(--border));
   background: hsl(var(--muted));
+  box-shadow:
+    0 20px 34px hsl(var(--foreground) / 0.12),
+    0 1px 0 hsl(0 0% 100% / 0.55) inset;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease,
+    filter 160ms ease;
+}
+
+.book-open:hover .cover-frame,
+.book-open:focus-visible .cover-frame {
+  border-color: hsl(var(--primary) / 0.4);
+  box-shadow:
+    0 28px 44px hsl(var(--foreground) / 0.16),
+    0 1px 0 hsl(0 0% 100% / 0.7) inset;
+  filter: saturate(1.04);
+  transform: translateY(-4px);
+}
+
+.book-open:focus-visible {
+  outline: none;
+}
+
+.book-open:focus-visible .cover-frame {
+  outline: 2px solid hsl(var(--primary) / 0.48);
+  outline-offset: 3px;
 }
 
 .cover-image {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -139,6 +155,81 @@ svg {
 .cover-fallback span {
   font-size: 0.875rem;
   font-weight: 700;
+}
+
+.cover-title {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: block;
+  padding: 1.35rem 0.8rem 0.75rem;
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+  background: linear-gradient(180deg, transparent 0%, hsl(var(--foreground) / 0.72) 48%, hsl(var(--foreground) / 0.9) 100%);
+  color: hsl(var(--primary-foreground));
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.15;
+  opacity: 0;
+  overflow-wrap: anywhere;
+  text-align: center;
+  transform: translateY(0.5rem);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.book-open:hover .cover-title,
+.book-open:focus-visible .cover-title {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.book-progress {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.28rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+
+.progress-ring {
+  width: 2.4rem;
+  height: 2.4rem;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.progress-ring-track,
+.progress-ring-fill {
+  fill: none;
+  stroke-width: 4;
+}
+
+.progress-ring-track {
+  stroke: hsl(var(--border));
+}
+
+.progress-ring-fill {
+  stroke: hsl(var(--primary));
+  stroke-linecap: round;
+  transition: stroke-dashoffset 220ms ease;
+}
+
+.shelf-skeleton-cover {
+  width: min(100%, 10.75rem);
+  aspect-ratio: 2 / 3;
+  border-radius: calc(var(--radius) - 1px);
+}
+
+.shelf-skeleton-progress {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 999px;
 }
 
 .reader-shell {
