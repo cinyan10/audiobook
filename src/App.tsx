@@ -454,7 +454,7 @@ function ReaderView({
                         data-reader-block
                         data-block-index={block.block_index}
                       >
-                        {block.text}
+                        <ReaderTokens block={block} />
                       </p>
                     ) : null,
                   )}
@@ -512,6 +512,26 @@ function formatChapterTitle(title: string) {
 
 function countWords(text: string) {
   return text.match(/[\p{L}\p{N}]+(?:['’.-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+}
+
+function ReaderTokens({ block }: { block: ChapterPayload["blocks"][number] }) {
+  if (!block.tokens.length) {
+    return <>{block.text}</>;
+  }
+  return (
+    <>
+      {block.tokens.map((token, index) => (
+        <span
+          key={`${block.block_index}-${index}`}
+          className={cn("reader-token", token.cefr_level && `level-${token.cefr_level.toLowerCase()}`)}
+          data-cefr-level={token.cefr_level || undefined}
+          data-root-text={token.root_text || undefined}
+        >
+          {token.text}
+        </span>
+      ))}
+    </>
+  );
 }
 
 function errorMessage(error: unknown, fallback: string) {

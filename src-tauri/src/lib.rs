@@ -1,3 +1,4 @@
+mod cefr;
 mod commands;
 mod db;
 mod epub;

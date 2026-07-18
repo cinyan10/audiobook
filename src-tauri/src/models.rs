@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::cefr::ReaderToken;
+
 #[derive(Debug, Serialize)]
 pub struct BookSummary {
     pub id: i64,
@@ -55,6 +57,7 @@ pub struct ChapterBlock {
     pub text: String,
     pub asset_path: Option<String>,
     pub alt: String,
+    pub tokens: Vec<ReaderToken>,
 }
 
 #[derive(Debug, Serialize)]

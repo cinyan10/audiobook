@@ -47,7 +47,17 @@ export type ChapterBlock = {
   text: string;
   asset_path: string | null;
   alt: string;
+  tokens: ReaderToken[];
 };
+
+export type ReaderToken = {
+  text: string;
+  normalized_text: string;
+  root_text: string;
+  cefr_level: CEFRLevel | null;
+};
+
+export type CEFRLevel = "A1" | "A2" | "B1" | "B2" | "C1" | "C2";
 
 export type ChapterPayload = {
   book_id: number;

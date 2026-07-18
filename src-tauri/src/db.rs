@@ -6,6 +6,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+use crate::cefr;
 use crate::epub;
 use crate::epub::ExtractedBlockKind;
 use crate::models::{BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload, ChapterSummary, ReaderPayload, ReadingProgress};
@@ -302,11 +303,15 @@ pub fn get_chapter(connection: &Connection, book_id: i64, chapter_index: i64) ->
             text: row.get(2)?,
             asset_path: row.get(3)?,
             alt: row.get(4)?,
+            tokens: Vec::new(),
         })
     })?;
 
     let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    let blocks = readable_chapter_blocks(&chapter.title, blocks);
+    let blocks = readable_chapter_blocks(&chapter.title, blocks)
+        .into_iter()
+        .map(with_cefr_tokens)
+        .collect();
 
     Ok(Some(ChapterPayload {
         book_id,
@@ -539,6 +544,13 @@ fn readable_chapter_blocks(chapter_title: &str, blocks: Vec<ChapterBlock>) -> Ve
         .collect()
 }
 
+fn with_cefr_tokens(mut block: ChapterBlock) -> ChapterBlock {
+    if block.kind == "paragraph" {
+        block.tokens = cefr::tokenize_text(&block.text);
+    }
+    block
+}
+
 fn is_redundant_chapter_text(chapter_title: &str, text: &str) -> bool {
     let normalized_title = normalize_inline(chapter_title);
     let normalized_text = normalize_inline(text);
@@ -738,6 +750,7 @@ mod tests {
                     text: "4 Komachi Hikigaya is shrewdly scheming. It was Sunday. The clear skies provided a brief respite from the rainy season. ".repeat(20),
                     asset_path: None,
                     alt: String::new(),
+                    tokens: Vec::new(),
                 },
                 ChapterBlock {
                     block_index: 2,
@@ -745,6 +758,7 @@ mod tests {
                     text: "4".to_string(),
                     asset_path: None,
                     alt: String::new(),
+                    tokens: Vec::new(),
                 },
                 ChapterBlock {
                     block_index: 3,
@@ -752,6 +766,7 @@ mod tests {
                     text: "Komachi Hikigaya is shrewdly scheming.".to_string(),
                     asset_path: None,
                     alt: String::new(),
+                    tokens: Vec::new(),
                 },
                 ChapterBlock {
                     block_index: 4,
@@ -759,6 +774,7 @@ mod tests {
                     text: "It was Sunday.".to_string(),
                     asset_path: None,
                     alt: String::new(),
+                    tokens: Vec::new(),
                 },
             ],
         );

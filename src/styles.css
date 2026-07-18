@@ -416,6 +416,34 @@ svg {
   scroll-margin-top: 6rem;
 }
 
+.reader-token {
+  background: transparent;
+}
+
+.reader-token.level-a1 {
+  color: #0069b4;
+}
+
+.reader-token.level-a2 {
+  color: #c91352;
+}
+
+.reader-token.level-b1 {
+  color: #b95b0b;
+}
+
+.reader-token.level-b2 {
+  color: #1a873b;
+}
+
+.reader-token.level-c1 {
+  color: #964db0;
+}
+
+.reader-token.level-c2 {
+  color: #475569;
+}
+
 @media (max-width: 900px) {
   .reader-shell.has-toc {
     grid-template-columns: 1fr;
