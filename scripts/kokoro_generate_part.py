@@ -17,6 +17,21 @@ REPO_ID = "hexgrad/Kokoro-82M"
 DEFAULT_VOICE = "bf_emma"
 
 
+def emit_progress(stage: str, completed: int, total: int) -> None:
+    print(
+        json.dumps(
+            {
+                "event": "progress",
+                "stage": stage,
+                "completed": completed,
+                "total": total,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
 def normalize_for_speech(text: str) -> str:
     replacements = {
         "Hikigaya": "Hee-kee-gah-yah",
@@ -62,6 +77,7 @@ def main() -> None:
     for paragraph in paragraphs:
         Path(paragraph["output_path"]).parent.mkdir(parents=True, exist_ok=True)
 
+    emit_progress("loading_model", 0, len(paragraphs))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = KModel(repo_id=REPO_ID).to(device).eval()
     pipeline = KPipeline(lang_code="b", repo_id=REPO_ID, model=model)
@@ -83,10 +99,12 @@ def main() -> None:
                 "duration_seconds": round(len(audio) / SAMPLE_RATE, 3),
             }
         )
+        emit_progress("rendering", len(rendered), len(paragraphs))
 
     if not part_chunks:
         raise RuntimeError("No paragraph audio generated.")
 
+    emit_progress("assembling", len(paragraphs), len(paragraphs))
     part_audio = np.concatenate(part_chunks)
     sf.write(part_output_path, part_audio, SAMPLE_RATE)
 

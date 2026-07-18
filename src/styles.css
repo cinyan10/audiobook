@@ -225,6 +225,29 @@ svg {
   transition: stroke-dashoffset 220ms ease;
 }
 
+.audio-progress-ring {
+  width: 1rem;
+  height: 1rem;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.audio-progress-ring-track,
+.audio-progress-ring-fill {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.audio-progress-ring-track {
+  stroke: oklch(var(--primary-foreground) / 0.35);
+}
+
+.audio-progress-ring-fill {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 220ms ease;
+}
+
 .shelf-skeleton-cover {
   width: min(100%, 10.75rem);
   aspect-ratio: 2 / 3;

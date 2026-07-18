@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{Emitter, State, Window};
 
 use crate::db::{self, GeneratedAudioParagraph, GeneratedPartAudio, ImportOutcome};
 use crate::models::{
@@ -113,6 +115,7 @@ pub async fn generate_part_audio(
     part_index: i64,
     regenerate: bool,
     state: State<'_, AppState>,
+    window: Window,
 ) -> Result<PartAudioPayload, String> {
     {
         let connection = state
@@ -189,8 +192,33 @@ pub async fn generate_part_audio(
 
     let generator_request_path = request_path.clone();
     let generator_response_path = response_path.clone();
+    let generator_window = window.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_kokoro_generator(&generator_request_path, &generator_response_path)
+        run_kokoro_generator(
+            &generator_request_path,
+            &generator_response_path,
+            move |line| {
+                let percent = match line.stage.as_str() {
+                    "loading_model" => 2.0,
+                    "rendering" => {
+                        let rendered = line.completed as f64 / line.total.max(1) as f64;
+                        5.0 + rendered * 85.0
+                    }
+                    "assembling" => 95.0,
+                    _ => 0.0,
+                };
+                emit_audio_generation_progress(
+                    &generator_window,
+                    book_id,
+                    chapter_index,
+                    part_index,
+                    line.completed,
+                    line.total,
+                    percent,
+                    &line.stage,
+                );
+            },
+        )
     })
     .await
     .map_err(|error| format!("Kokoro generation task failed: {error}"))??;
@@ -226,7 +254,18 @@ pub async fn generate_part_audio(
         .db
         .lock()
         .map_err(|_| "Database lock failed.".to_string())?;
-    db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())
+    let saved = db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())?;
+    emit_audio_generation_progress(
+        &window,
+        book_id,
+        chapter_index,
+        part_index,
+        saved.paragraph_count.max(0) as usize,
+        saved.paragraph_count.max(0) as usize,
+        100.0,
+        "complete",
+    );
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -281,7 +320,57 @@ struct GeneratorResponseParagraph {
     duration_seconds: f64,
 }
 
-fn run_kokoro_generator(request_path: &Path, response_path: &Path) -> Result<(), String> {
+#[derive(Debug, Deserialize)]
+struct GeneratorProgressLine {
+    event: String,
+    stage: String,
+    completed: usize,
+    total: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AudioGenerationProgress {
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    completed: usize,
+    total: usize,
+    percent: f64,
+    stage: String,
+}
+
+fn emit_audio_generation_progress(
+    window: &Window,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    completed: usize,
+    total: usize,
+    percent: f64,
+    stage: &str,
+) {
+    let _ = window.emit(
+        "part-audio-progress",
+        AudioGenerationProgress {
+            book_id,
+            chapter_index,
+            part_index,
+            completed,
+            total,
+            percent: percent.clamp(0.0, 100.0),
+            stage: stage.to_string(),
+        },
+    );
+}
+
+fn run_kokoro_generator<F>(
+    request_path: &Path,
+    response_path: &Path,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(GeneratorProgressLine),
+{
     let repo_root = repo_root();
     let python_path = std::env::var_os("READALONG_KOKORO_PYTHON")
         .map(PathBuf::from)
@@ -303,25 +392,57 @@ fn run_kokoro_generator(request_path: &Path, response_path: &Path) -> Result<(),
         ));
     }
 
-    let output = Command::new(&python_path)
+    let mut child = Command::new(&python_path)
         .arg(&script_path)
         .arg("--request")
         .arg(request_path)
         .arg("--response")
         .arg(response_path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("Unable to start Kokoro generator: {error}"))?;
 
-    if output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Unable to read Kokoro generator stdout.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Unable to read Kokoro generator stderr.".to_string())?;
+    let stderr_reader = thread::spawn(move || {
+        let mut details = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut details);
+        details
+    });
+
+    let mut stdout_details = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("Unable to read Kokoro generator output: {error}"))?;
+        if let Ok(progress) = serde_json::from_str::<GeneratorProgressLine>(&line) {
+            if progress.event == "progress" {
+                on_progress(progress);
+                continue;
+            }
+        }
+        stdout_details.push(line);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Unable to wait for Kokoro generator: {error}"))?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if status.success() {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let details = if stderr.trim().is_empty() {
-        stdout.trim()
+        stdout_details.join("\n")
     } else {
-        stderr.trim()
+        stderr.trim().to_string()
     };
     Err(format!("Kokoro generation failed: {details}"))
 }

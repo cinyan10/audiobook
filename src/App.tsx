@@ -1,4 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AudioLinesIcon,
@@ -38,6 +39,16 @@ import { cn } from "@/lib/utils";
 type ViewState =
   | { kind: "library" }
   | { kind: "reader"; bookId: number; chapterIndex?: number };
+
+type AudioGenerationProgress = {
+  book_id: number;
+  chapter_index: number;
+  part_index: number;
+  completed: number;
+  total: number;
+  percent: number;
+  stage: string;
+};
 
 function App() {
   const [view, setView] = useState<ViewState>({ kind: "library" });
@@ -232,6 +243,26 @@ function ProgressRing({ percent }: { percent: number }) {
   );
 }
 
+function AudioGenerationRing({ percent }: { percent: number }) {
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
+  const clampedPercent = Math.max(0, Math.min(100, percent));
+  const offset = circumference * (1 - clampedPercent / 100);
+
+  return (
+    <svg className="audio-progress-ring" viewBox="0 0 24 24" aria-hidden="true">
+      <circle className="audio-progress-ring-track" cx="12" cy="12" r={radius} />
+      <circle
+        className="audio-progress-ring-fill"
+        cx="12"
+        cy="12"
+        r={radius}
+        style={{ strokeDasharray: circumference, strokeDashoffset: offset }}
+      />
+    </svg>
+  );
+}
+
 function ReaderView({
   bookId,
   initialChapterIndex,
@@ -250,6 +281,7 @@ function ReaderView({
   const [partAudio, setPartAudio] = useState<PartAudioPayload | null>(null);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const [generatingAudio, setGeneratingAudio] = useState(false);
+  const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
@@ -382,6 +414,39 @@ function ReaderView({
     () => visibleBlocks.reduce((total, block) => total + countWords(block.text), 0),
     [visibleBlocks],
   );
+  const partParagraphCount = useMemo(
+    () => visibleBlocks.filter((block) => block.kind === "paragraph").length,
+    [visibleBlocks],
+  );
+
+  useEffect(() => {
+    if (!activePart) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<AudioGenerationProgress>("part-audio-progress", (event) => {
+      const progress = event.payload;
+      if (
+        progress.book_id !== bookId ||
+        progress.chapter_index !== chapterIndex ||
+        progress.part_index !== activePart.part_index
+      ) {
+        return;
+      }
+      setAudioProgress(progress);
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        unlisten = cleanup;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [activePart, bookId, chapterIndex]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -389,6 +454,7 @@ function ReaderView({
     audio?.removeAttribute("src");
     audio?.load();
     setPartAudio(null);
+    setAudioProgress(null);
     setAudioState({ currentTime: 0, duration: 0, playing: false });
 
     if (!reader || !chapter || !activePart) {
@@ -475,6 +541,15 @@ function ReaderView({
       if (!activePart) {
         return;
       }
+      setAudioProgress({
+        book_id: bookId,
+        chapter_index: chapterIndex,
+        part_index: activePart.part_index,
+        completed: 0,
+        total: partParagraphCount,
+        percent: 0,
+        stage: "queued",
+      });
       setGeneratingAudio(true);
       try {
         const payload = await generatePartAudio(bookId, chapterIndex, activePart.part_index, regenerate);
@@ -484,9 +559,10 @@ function ReaderView({
         toast.error(errorMessage(error, "Audio generation failed."));
       } finally {
         setGeneratingAudio(false);
+        setAudioProgress(null);
       }
     },
-    [activePart, bookId, chapterIndex],
+    [activePart, bookId, chapterIndex, partParagraphCount],
   );
 
   const toggleAudioPlay = useCallback(() => {
@@ -509,6 +585,12 @@ function ReaderView({
     audio.currentTime = Math.max(0, Math.min(time, Number.isFinite(audio.duration) ? audio.duration : time));
     setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
   }, []);
+
+  const audioGenerationPercent = Math.round(audioProgress?.percent ?? 0);
+  const audioGenerationStatus =
+    audioProgress && audioProgress.total > 0
+      ? `Generating audio, ${audioGenerationPercent}%, ${audioProgress.completed} of ${audioProgress.total} paragraphs complete`
+      : "Generating audio";
 
   return (
     <TooltipProvider>
@@ -586,9 +668,9 @@ function ReaderView({
                     {partAudio ? (
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
-                          <Button size="sm" disabled={generatingAudio || loadingAudio}>
-                            <AudioLinesIcon data-icon="inline-start" />
-                            {generatingAudio ? "Generating audio..." : "Regenerate audio"}
+                          <Button size="sm" disabled={generatingAudio || loadingAudio} aria-label={generatingAudio ? audioGenerationStatus : undefined}>
+                            {generatingAudio ? <AudioGenerationRing percent={audioProgress?.percent ?? 0} /> : <AudioLinesIcon data-icon="inline-start" />}
+                            {generatingAudio ? `Generating ${audioGenerationPercent}%` : "Regenerate audio"}
                           </Button>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
@@ -611,9 +693,10 @@ function ReaderView({
                         size="sm"
                         disabled={generatingAudio || loadingAudio || !activePart}
                         onClick={() => void generateCurrentPartAudio(false)}
+                        aria-label={generatingAudio ? audioGenerationStatus : undefined}
                       >
-                        <AudioLinesIcon data-icon="inline-start" />
-                        {generatingAudio ? "Generating audio..." : "Generate audio"}
+                        {generatingAudio ? <AudioGenerationRing percent={audioProgress?.percent ?? 0} /> : <AudioLinesIcon data-icon="inline-start" />}
+                        {generatingAudio ? `Generating ${audioGenerationPercent}%` : "Generate audio"}
                       </Button>
                     )}
                   </div>
