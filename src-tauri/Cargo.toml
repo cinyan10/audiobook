@@ -1,0 +1,26 @@
+[package]
+name = "readalong"
+version = "0.1.0"
+description = "A local desktop reader for imported books."
+authors = ["Cinyan10"]
+edition = "2021"
+
+[lib]
+name = "readalong_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+anyhow = "1.0.95"
+chrono = { version = "0.4.39", features = ["serde"] }
+roxmltree = "0.20.0"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+scraper = "0.22.0"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+sha2 = "0.10.8"
+tauri = { version = "2.2.5", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.2.0"
+zip = "2.2.2"

@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 .uv-cache/
 .playwright-cli/
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
 data/
 books/
 audio/
