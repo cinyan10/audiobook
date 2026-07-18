@@ -69,6 +69,18 @@ pub struct ChapterPayload {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PartAudioPayload {
+    pub book_id: i64,
+    pub chapter_index: i64,
+    pub part_index: i64,
+    pub voice: String,
+    pub audio_path: String,
+    pub paragraph_count: i64,
+    pub duration_seconds: f64,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ImportFailure {
     pub path: String,
     pub message: String,

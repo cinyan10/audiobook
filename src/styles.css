@@ -404,6 +404,51 @@ svg {
   padding-left: 0.6rem;
 }
 
+.reader-audio {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  z-index: 30;
+  display: inline-flex;
+  width: min(34rem, calc(100vw - 2rem));
+  align-items: center;
+  gap: 0.6rem;
+  transform: translateX(-50%);
+  border: 1px solid oklch(var(--border) / 0.72);
+  border-radius: 999px;
+  background: oklch(var(--background) / 0.86);
+  box-shadow: 0 18px 44px oklch(var(--foreground) / 0.16);
+  padding: 0.45rem 0.65rem;
+  backdrop-filter: blur(18px);
+}
+
+.audio-button {
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.audio-button svg {
+  fill: currentColor;
+}
+
+.audio-timeline {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.55rem;
+  color: oklch(var(--muted-foreground));
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.audio-slider {
+  min-width: 8rem;
+  flex: 1 1 auto;
+  accent-color: oklch(var(--primary));
+}
+
 .reader-text {
   padding-top: 2rem;
   font-family: Georgia, "Times New Roman", serif;
@@ -459,5 +504,13 @@ svg {
 
   .reader-page {
     padding: 2.5rem 1.25rem 6rem;
+  }
+
+  .reader-audio {
+    bottom: 0.75rem;
+  }
+
+  .audio-timeline span:last-child {
+    display: none;
   }
 }

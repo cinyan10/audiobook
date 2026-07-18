@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 use crate::cefr;
 use crate::epub;
 use crate::epub::ExtractedBlockKind;
-use crate::models::{BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload, ChapterSummary, ReaderPayload, ReadingProgress};
+use crate::models::{
+    BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload, ChapterSummary,
+    PartAudioPayload, ReaderPayload, ReadingProgress,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS books (
@@ -54,15 +57,68 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     progress_percent REAL NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS audio_paragraphs (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    part_index INTEGER NOT NULL,
+    block_index INTEGER NOT NULL,
+    voice TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    audio_path TEXT NOT NULL,
+    duration_seconds REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(book_id, block_index, voice)
+);
+
+CREATE TABLE IF NOT EXISTS audio_parts (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    part_index INTEGER NOT NULL,
+    voice TEXT NOT NULL,
+    audio_path TEXT NOT NULL,
+    paragraph_count INTEGER NOT NULL DEFAULT 0,
+    duration_seconds REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(book_id, chapter_index, part_index, voice)
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
 CREATE INDEX IF NOT EXISTS idx_book_chapters_book ON book_chapters(book_id, chapter_index);
 CREATE INDEX IF NOT EXISTS idx_chapter_blocks_book ON chapter_blocks(book_id, chapter_index, block_index);
 CREATE INDEX IF NOT EXISTS idx_reading_progress_last_read ON reading_progress(last_read_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audio_paragraphs_part ON audio_paragraphs(book_id, chapter_index, part_index, voice);
 "#;
 
 pub enum ImportOutcome {
     Imported,
     Skipped,
+}
+
+#[derive(Debug)]
+pub struct AudioParagraphSource {
+    pub block_index: i64,
+    pub text: String,
+}
+
+#[derive(Debug)]
+pub struct GeneratedAudioParagraph {
+    pub block_index: i64,
+    pub text_hash: String,
+    pub audio_path: String,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug)]
+pub struct GeneratedPartAudio {
+    pub book_id: i64,
+    pub chapter_index: i64,
+    pub part_index: i64,
+    pub voice: String,
+    pub audio_path: String,
+    pub duration_seconds: f64,
+    pub paragraphs: Vec<GeneratedAudioParagraph>,
 }
 
 pub fn connect(path: &Path) -> Result<Connection> {
@@ -104,10 +160,15 @@ pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
             updated_at: row.get(7)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
-pub fn import_book(connection: &mut Connection, data_dir: &Path, source_path: &Path) -> Result<ImportOutcome> {
+pub fn import_book(
+    connection: &mut Connection,
+    data_dir: &Path,
+    source_path: &Path,
+) -> Result<ImportOutcome> {
     if !source_path
         .extension()
         .and_then(|value| value.to_str())
@@ -116,16 +177,22 @@ pub fn import_book(connection: &mut Connection, data_dir: &Path, source_path: &P
         return Err(anyhow!("Only EPUB files can be imported in phase 1."));
     }
 
-    let bytes = fs::read(source_path).with_context(|| format!("Unable to read {}", source_path.display()))?;
+    let bytes = fs::read(source_path)
+        .with_context(|| format!("Unable to read {}", source_path.display()))?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let existing: Option<i64> = connection
-        .query_row("SELECT id FROM books WHERE content_hash = ?", params![hash], |row| row.get(0))
+        .query_row(
+            "SELECT id FROM books WHERE content_hash = ?",
+            params![hash],
+            |row| row.get(0),
+        )
         .optional()?;
     if existing.is_some() {
         return Ok(ImportOutcome::Skipped);
     }
 
-    let extracted = epub::read_epub(source_path).with_context(|| format!("Unable to parse {}", source_path.display()))?;
+    let extracted = epub::read_epub(source_path)
+        .with_context(|| format!("Unable to parse {}", source_path.display()))?;
     if extracted.chapters.is_empty() {
         return Err(anyhow!("No readable chapters were found."));
     }
@@ -279,10 +346,20 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
     }))
 }
 
-pub fn get_chapter(connection: &Connection, book_id: i64, chapter_index: i64) -> Result<Option<ChapterPayload>> {
+pub fn get_chapter(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+) -> Result<Option<ChapterPayload>> {
     let raw_chapters = raw_chapter_summaries(connection, book_id)?;
-    let chapters = build_reader_chapters(&raw_chapters, &block_markers(connection, book_id, &raw_chapters)?)?;
-    let Some(chapter) = chapters.into_iter().find(|item| item.chapter_index == chapter_index) else {
+    let chapters = build_reader_chapters(
+        &raw_chapters,
+        &block_markers(connection, book_id, &raw_chapters)?,
+    )?;
+    let Some(chapter) = chapters
+        .into_iter()
+        .find(|item| item.chapter_index == chapter_index)
+    else {
         return Ok(None);
     };
 
@@ -296,16 +373,19 @@ pub fn get_chapter(connection: &Connection, book_id: i64, chapter_index: i64) ->
         ORDER BY block_index
         "#,
     )?;
-    let rows = statement.query_map(params![book_id, chapter.start_block_index, chapter.end_block_index], |row| {
-        Ok(ChapterBlock {
-            block_index: row.get(0)?,
-            kind: row.get(1)?,
-            text: row.get(2)?,
-            asset_path: row.get(3)?,
-            alt: row.get(4)?,
-            tokens: Vec::new(),
-        })
-    })?;
+    let rows = statement.query_map(
+        params![book_id, chapter.start_block_index, chapter.end_block_index],
+        |row| {
+            Ok(ChapterBlock {
+                block_index: row.get(0)?,
+                kind: row.get(1)?,
+                text: row.get(2)?,
+                asset_path: row.get(3)?,
+                alt: row.get(4)?,
+                tokens: Vec::new(),
+            })
+        },
+    )?;
 
     let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     let blocks = readable_chapter_blocks(&chapter.title, blocks)
@@ -319,6 +399,174 @@ pub fn get_chapter(connection: &Connection, book_id: i64, chapter_index: i64) ->
         title: chapter.title,
         blocks,
     }))
+}
+
+pub fn get_part_audio(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+) -> Result<Option<PartAudioPayload>> {
+    connection
+        .query_row(
+            r#"
+            SELECT book_id, chapter_index, part_index, voice, audio_path, paragraph_count, duration_seconds, updated_at
+            FROM audio_parts
+            WHERE book_id = ?
+              AND chapter_index = ?
+              AND part_index = ?
+              AND voice = ?
+            "#,
+            params![book_id, chapter_index, part_index, voice],
+            |row| {
+                Ok(PartAudioPayload {
+                    book_id: row.get(0)?,
+                    chapter_index: row.get(1)?,
+                    part_index: row.get(2)?,
+                    voice: row.get(3)?,
+                    audio_path: row.get(4)?,
+                    paragraph_count: row.get(5)?,
+                    duration_seconds: row.get(6)?,
+                    generated_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn part_audio_paragraphs(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+) -> Result<Vec<AudioParagraphSource>> {
+    let raw_chapters = raw_chapter_summaries(connection, book_id)?;
+    let chapters = build_reader_chapters(
+        &raw_chapters,
+        &block_markers(connection, book_id, &raw_chapters)?,
+    )?;
+    let Some(chapter) = chapters
+        .into_iter()
+        .find(|item| item.chapter_index == chapter_index)
+    else {
+        return Err(anyhow!("Chapter not found."));
+    };
+    let Some(part) = chapter
+        .parts
+        .iter()
+        .find(|item| item.part_index == part_index)
+    else {
+        return Err(anyhow!("Part not found."));
+    };
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT block_index, kind, text, asset_path, alt
+        FROM chapter_blocks
+        WHERE book_id = ?
+          AND block_index BETWEEN ? AND ?
+          AND kind = 'paragraph'
+        ORDER BY block_index
+        "#,
+    )?;
+    let rows = statement.query_map(
+        params![book_id, part.start_block_index, part.end_block_index],
+        |row| {
+            Ok(ChapterBlock {
+                block_index: row.get(0)?,
+                kind: row.get(1)?,
+                text: row.get(2)?,
+                asset_path: row.get(3)?,
+                alt: row.get(4)?,
+                tokens: Vec::new(),
+            })
+        },
+    )?;
+    let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(readable_chapter_blocks(&chapter.title, blocks)
+        .into_iter()
+        .filter(|block| !block.text.trim().is_empty())
+        .map(|block| AudioParagraphSource {
+            block_index: block.block_index,
+            text: block.text,
+        })
+        .collect())
+}
+
+pub fn save_part_audio(
+    connection: &mut Connection,
+    audio: &GeneratedPartAudio,
+) -> Result<PartAudioPayload> {
+    let timestamp = now_iso();
+    let tx = connection.transaction()?;
+
+    tx.execute(
+        r#"
+        INSERT INTO audio_parts (
+            book_id, chapter_index, part_index, voice, audio_path, paragraph_count, duration_seconds, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id, chapter_index, part_index, voice) DO UPDATE SET
+            audio_path = excluded.audio_path,
+            paragraph_count = excluded.paragraph_count,
+            duration_seconds = excluded.duration_seconds,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            audio.book_id,
+            audio.chapter_index,
+            audio.part_index,
+            audio.voice,
+            audio.audio_path,
+            audio.paragraphs.len() as i64,
+            audio.duration_seconds,
+            timestamp,
+            timestamp
+        ],
+    )?;
+
+    for paragraph in &audio.paragraphs {
+        tx.execute(
+            r#"
+            INSERT INTO audio_paragraphs (
+                book_id, chapter_index, part_index, block_index, voice, text_hash, audio_path,
+                duration_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_id, block_index, voice) DO UPDATE SET
+                chapter_index = excluded.chapter_index,
+                part_index = excluded.part_index,
+                text_hash = excluded.text_hash,
+                audio_path = excluded.audio_path,
+                duration_seconds = excluded.duration_seconds,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                audio.book_id,
+                audio.chapter_index,
+                audio.part_index,
+                paragraph.block_index,
+                audio.voice,
+                paragraph.text_hash,
+                paragraph.audio_path,
+                paragraph.duration_seconds,
+                timestamp,
+                timestamp
+            ],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(PartAudioPayload {
+        book_id: audio.book_id,
+        chapter_index: audio.chapter_index,
+        part_index: audio.part_index,
+        voice: audio.voice.clone(),
+        audio_path: audio.audio_path.clone(),
+        paragraph_count: audio.paragraphs.len() as i64,
+        duration_seconds: audio.duration_seconds,
+        generated_at: timestamp,
+    })
 }
 
 pub fn save_progress(
@@ -348,7 +596,10 @@ pub fn save_progress(
 
 fn chapter_summaries(connection: &Connection, book_id: i64) -> Result<Vec<ChapterSummary>> {
     let raw_chapters = raw_chapter_summaries(connection, book_id)?;
-    build_reader_chapters(&raw_chapters, &block_markers(connection, book_id, &raw_chapters)?)
+    build_reader_chapters(
+        &raw_chapters,
+        &block_markers(connection, book_id, &raw_chapters)?,
+    )
 }
 
 #[derive(Debug)]
@@ -384,10 +635,15 @@ fn raw_chapter_summaries(connection: &Connection, book_id: i64) -> Result<Vec<Ra
             end_block_index: row.get(3)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
-fn block_markers(connection: &Connection, book_id: i64, raw_chapters: &[RawChapterSummary]) -> Result<Vec<BlockMarker>> {
+fn block_markers(
+    connection: &Connection,
+    book_id: i64,
+    raw_chapters: &[RawChapterSummary],
+) -> Result<Vec<BlockMarker>> {
     let mut statement = connection.prepare(
         r#"
         SELECT block_index, kind, asset_path
@@ -410,9 +666,11 @@ fn block_markers(connection: &Connection, book_id: i64, raw_chapters: &[RawChapt
     }
 
     let stored_path = connection
-        .query_row("SELECT stored_path FROM books WHERE id = ?", params![book_id], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT stored_path FROM books WHERE id = ?",
+            params![book_id],
+            |row| row.get::<_, String>(0),
+        )
         .optional()?;
     let Some(stored_path) = stored_path else {
         return Ok(markers);
@@ -425,7 +683,10 @@ fn block_markers(connection: &Connection, book_id: i64, raw_chapters: &[RawChapt
     }
 }
 
-fn derive_divider_markers(source_path: &Path, raw_chapters: &[RawChapterSummary]) -> Vec<BlockMarker> {
+fn derive_divider_markers(
+    source_path: &Path,
+    raw_chapters: &[RawChapterSummary],
+) -> Vec<BlockMarker> {
     let mut markers = Vec::new();
     for chapter in raw_chapters {
         let Ok(blocks) = epub::read_chapter_blocks(source_path, &chapter.source_href) else {
@@ -451,7 +712,10 @@ fn derive_divider_markers(source_path: &Path, raw_chapters: &[RawChapterSummary]
     markers
 }
 
-fn build_reader_chapters(raw_chapters: &[RawChapterSummary], markers: &[BlockMarker]) -> Result<Vec<ChapterSummary>> {
+fn build_reader_chapters(
+    raw_chapters: &[RawChapterSummary],
+    markers: &[BlockMarker],
+) -> Result<Vec<ChapterSummary>> {
     let mut groups: Vec<Vec<&RawChapterSummary>> = Vec::new();
     let mut previous_key = String::new();
 
@@ -497,7 +761,9 @@ fn build_chapter_parts(
         .iter()
         .filter(|marker| is_divider_marker(marker))
         .map(|marker| (marker.block_index, marker.consumes_block))
-        .filter(|(block_index, _)| *block_index > start_block_index && *block_index <= end_block_index)
+        .filter(|(block_index, _)| {
+            *block_index > start_block_index && *block_index <= end_block_index
+        })
         .collect::<Vec<_>>();
     splits.sort_unstable();
     splits.dedup();
@@ -540,7 +806,9 @@ fn is_divider_path(path: &str) -> bool {
 fn readable_chapter_blocks(chapter_title: &str, blocks: Vec<ChapterBlock>) -> Vec<ChapterBlock> {
     blocks
         .into_iter()
-        .filter(|block| block.kind != "paragraph" || !is_redundant_chapter_text(chapter_title, &block.text))
+        .filter(|block| {
+            block.kind != "paragraph" || !is_redundant_chapter_text(chapter_title, &block.text)
+        })
         .collect()
 }
 
@@ -564,7 +832,8 @@ fn is_redundant_chapter_text(chapter_title: &str, text: &str) -> bool {
             return true;
         }
     }
-    normalized_text.len() > normalized_title.len() + 500 && normalized_text.starts_with(&normalized_title)
+    normalized_text.len() > normalized_title.len() + 500
+        && normalized_text.starts_with(&normalized_title)
 }
 
 fn normalize_inline(value: &str) -> String {
@@ -613,7 +882,10 @@ fn chapter_number_stem(stem: &str) -> Option<String> {
     if suffix.is_empty()
         || (suffix.len() == 2
             && suffix.starts_with('_')
-            && suffix.chars().nth(1).is_some_and(|value| value.is_ascii_lowercase()))
+            && suffix
+                .chars()
+                .nth(1)
+                .is_some_and(|value| value.is_ascii_lowercase()))
     {
         Some(format!("chapter{digits}"))
     } else {
@@ -664,7 +936,10 @@ mod tests {
 
     #[test]
     fn slugifies_titles_for_storage() {
-        assert_eq!(slugify("My Youth Romantic Comedy, Vol. 1"), "my-youth-romantic-comedy-vol-1");
+        assert_eq!(
+            slugify("My Youth Romantic Comedy, Vol. 1"),
+            "my-youth-romantic-comedy-vol-1"
+        );
         assert_eq!(slugify("!!!"), "book");
     }
 
@@ -720,14 +995,21 @@ mod tests {
         let chapters = build_reader_chapters(&raw_chapters, &markers).expect("chapters");
 
         assert_eq!(chapters.len(), 1);
-        assert_eq!(chapters[0].title, "4 Komachi Hikigaya is shrewdly scheming.");
+        assert_eq!(
+            chapters[0].title,
+            "4 Komachi Hikigaya is shrewdly scheming."
+        );
         assert_eq!(chapters[0].start_block_index, 10);
         assert_eq!(chapters[0].end_block_index, 39);
         assert_eq!(
             chapters[0]
                 .parts
                 .iter()
-                .map(|part| (part.title.as_str(), part.start_block_index, part.end_block_index))
+                .map(|part| (
+                    part.title.as_str(),
+                    part.start_block_index,
+                    part.end_block_index
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("Part 1", 10, 14),

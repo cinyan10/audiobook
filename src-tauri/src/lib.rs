@@ -34,6 +34,8 @@ pub fn run() {
             commands::import_books,
             commands::get_reader,
             commands::get_chapter,
+            commands::get_part_audio,
+            commands::generate_part_audio,
             commands::save_progress,
         ])
         .run(tauri::generate_context!())

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { BookSummary, ChapterPayload, ImportSummary, ReaderPayload } from "@/types";
+import type { BookSummary, ChapterPayload, ImportSummary, PartAudioPayload, ReaderPayload } from "@/types";
 
 export function listBooks() {
   return invoke<BookSummary[]>("list_books");
@@ -16,6 +16,19 @@ export function getReader(bookId: number) {
 
 export function getChapter(bookId: number, chapterIndex: number) {
   return invoke<ChapterPayload>("get_chapter", { bookId, chapterIndex });
+}
+
+export function getPartAudio(bookId: number, chapterIndex: number, partIndex: number) {
+  return invoke<PartAudioPayload | null>("get_part_audio", { bookId, chapterIndex, partIndex });
+}
+
+export function generatePartAudio(bookId: number, chapterIndex: number, partIndex: number, regenerate: boolean) {
+  return invoke<PartAudioPayload>("generate_part_audio", {
+    bookId,
+    chapterIndex,
+    partIndex,
+    regenerate,
+  });
 }
 
 export function saveProgress(bookId: number, chapterIndex: number, blockIndex: number, progressPercent: number) {

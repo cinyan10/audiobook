@@ -3,6 +3,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.venv-kokoro/
 .uv-cache/
 .playwright-cli/
 node_modules/

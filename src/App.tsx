@@ -1,11 +1,31 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { BookOpenTextIcon, ChevronLeftIcon, ImportIcon, LibraryIcon, MenuIcon } from "lucide-react";
+import {
+  AudioLinesIcon,
+  BookOpenTextIcon,
+  ChevronLeftIcon,
+  ImportIcon,
+  LibraryIcon,
+  MenuIcon,
+  PauseIcon,
+  PlayIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { getChapter, getReader, importBooks, listBooks, saveProgress } from "@/lib/api";
-import type { BookSummary, ChapterPayload, ReaderPayload } from "@/types";
+import { generatePartAudio, getChapter, getPartAudio, getReader, importBooks, listBooks, saveProgress } from "@/lib/api";
+import type { BookSummary, ChapterPayload, PartAudioPayload, ReaderPayload } from "@/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
@@ -227,6 +247,11 @@ function ReaderView({
   const [partIndex, setPartIndex] = useState(0);
   const [tocOpen, setTocOpen] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [partAudio, setPartAudio] = useState<PartAudioPayload | null>(null);
+  const [loadingAudio, setLoadingAudio] = useState(false);
+  const [generatingAudio, setGeneratingAudio] = useState(false);
+  const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const pendingPartBlockRef = useRef<number | null>(null);
@@ -358,6 +383,82 @@ function ReaderView({
     [visibleBlocks],
   );
 
+  useEffect(() => {
+    const audio = audioRef.current;
+    audio?.pause();
+    audio?.removeAttribute("src");
+    audio?.load();
+    setPartAudio(null);
+    setAudioState({ currentTime: 0, duration: 0, playing: false });
+
+    if (!reader || !chapter || !activePart) {
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingAudio(true);
+    void getPartAudio(bookId, chapterIndex, activePart.part_index)
+      .then((payload) => {
+        if (!cancelled) {
+          setPartAudio(payload);
+        }
+      })
+      .catch((error) => toast.error(errorMessage(error, "Failed to check part audio.")))
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingAudio(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePart, bookId, chapter, chapterIndex, reader]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+    if (!partAudio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      setAudioState({ currentTime: 0, duration: 0, playing: false });
+      return;
+    }
+
+    audio.pause();
+    audio.src = convertFileSrc(partAudio.audio_path);
+    audio.load();
+    setAudioState({ currentTime: 0, duration: 0, playing: false });
+  }, [partAudio]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+    const syncAudioState = () => {
+      setAudioState({
+        currentTime: audio.currentTime,
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        playing: !audio.paused,
+      });
+    };
+    audio.addEventListener("loadedmetadata", syncAudioState);
+    audio.addEventListener("timeupdate", syncAudioState);
+    audio.addEventListener("play", syncAudioState);
+    audio.addEventListener("pause", syncAudioState);
+    audio.addEventListener("ended", syncAudioState);
+    return () => {
+      audio.removeEventListener("loadedmetadata", syncAudioState);
+      audio.removeEventListener("timeupdate", syncAudioState);
+      audio.removeEventListener("play", syncAudioState);
+      audio.removeEventListener("pause", syncAudioState);
+      audio.removeEventListener("ended", syncAudioState);
+    };
+  }, []);
+
   const selectChapter = useCallback((nextChapterIndex: number, nextPartIndex = 0, startBlockIndex?: number) => {
     pendingPartBlockRef.current = startBlockIndex ?? null;
     setPartIndex(nextPartIndex);
@@ -368,6 +469,46 @@ function ReaderView({
       });
     }
   }, [chapterIndex]);
+
+  const generateCurrentPartAudio = useCallback(
+    async (regenerate: boolean) => {
+      if (!activePart) {
+        return;
+      }
+      setGeneratingAudio(true);
+      try {
+        const payload = await generatePartAudio(bookId, chapterIndex, activePart.part_index, regenerate);
+        setPartAudio(payload);
+        toast.success(regenerate ? "Audio regenerated." : "Audio generated.");
+      } catch (error) {
+        toast.error(errorMessage(error, "Audio generation failed."));
+      } finally {
+        setGeneratingAudio(false);
+      }
+    },
+    [activePart, bookId, chapterIndex],
+  );
+
+  const toggleAudioPlay = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio || !partAudio) {
+      return;
+    }
+    if (audio.paused) {
+      void audio.play().catch((error) => toast.error(errorMessage(error, "Failed to play audio.")));
+    } else {
+      audio.pause();
+    }
+  }, [partAudio]);
+
+  const seekAudio = useCallback((time: number) => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+    audio.currentTime = Math.max(0, Math.min(time, Number.isFinite(audio.duration) ? audio.duration : time));
+    setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
+  }, []);
 
   return (
     <TooltipProvider>
@@ -442,6 +583,39 @@ function ReaderView({
                   {activePart && activeChapter && activeChapter.parts.length > 1 ? <span>{activePart.title}</span> : null}
                   <div className="part-stats" aria-label="Part statistics">
                     <span>{partWordCount.toLocaleString()} words</span>
+                    {partAudio ? (
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button size="sm" disabled={generatingAudio || loadingAudio}>
+                            <AudioLinesIcon data-icon="inline-start" />
+                            {generatingAudio ? "Generating audio..." : "Regenerate audio"}
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Regenerate audio?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              The current generated audio for this part will be replaced.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction onClick={() => void generateCurrentPartAudio(true)}>
+                              Regenerate
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    ) : (
+                      <Button
+                        size="sm"
+                        disabled={generatingAudio || loadingAudio || !activePart}
+                        onClick={() => void generateCurrentPartAudio(false)}
+                      >
+                        <AudioLinesIcon data-icon="inline-start" />
+                        {generatingAudio ? "Generating audio..." : "Generate audio"}
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <Separator />
@@ -463,6 +637,16 @@ function ReaderView({
             )}
           </article>
         </div>
+        <audio ref={audioRef} preload="metadata" className="hidden" />
+        {partAudio ? (
+          <PartAudioPlayer
+            playing={audioState.playing}
+            currentTime={audioState.currentTime}
+            duration={audioState.duration}
+            onTogglePlay={toggleAudioPlay}
+            onSeek={seekAudio}
+          />
+        ) : null}
       </main>
     </TooltipProvider>
   );
@@ -477,6 +661,43 @@ function LibrarySkeleton() {
           <Skeleton className="shelf-skeleton-progress" />
         </div>
       ))}
+    </div>
+  );
+}
+
+function PartAudioPlayer({
+  playing,
+  currentTime,
+  duration,
+  onTogglePlay,
+  onSeek,
+}: {
+  playing: boolean;
+  currentTime: number;
+  duration: number;
+  onTogglePlay: () => void;
+  onSeek: (time: number) => void;
+}) {
+  const safeDuration = Math.max(duration, 0);
+  return (
+    <div className="reader-audio" aria-label="Audio playback controls">
+      <Button className="audio-button" size="icon" onClick={onTogglePlay} aria-label={playing ? "Pause" : "Play"}>
+        {playing ? <PauseIcon aria-hidden="true" /> : <PlayIcon aria-hidden="true" />}
+      </Button>
+      <div className="audio-timeline">
+        <span>{formatClock(currentTime)}</span>
+        <input
+          className="audio-slider"
+          type="range"
+          min={0}
+          max={safeDuration}
+          step={0.1}
+          value={Math.min(currentTime, safeDuration)}
+          onChange={(event) => onSeek(Number(event.target.value))}
+          aria-label="Audio position"
+        />
+        <span>{formatClock(duration)}</span>
+      </div>
     </div>
   );
 }
@@ -512,6 +733,16 @@ function formatChapterTitle(title: string) {
 
 function countWords(text: string) {
   return text.match(/[\p{L}\p{N}]+(?:['’.-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+}
+
+function formatClock(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "0:00";
+  }
+  const whole = Math.floor(seconds);
+  const minutes = Math.floor(whole / 60);
+  const remainingSeconds = whole % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function ReaderTokens({ block }: { block: ChapterPayload["blocks"][number] }) {

@@ -66,6 +66,17 @@ export type ChapterPayload = {
   blocks: ChapterBlock[];
 };
 
+export type PartAudioPayload = {
+  book_id: number;
+  chapter_index: number;
+  part_index: number;
+  voice: string;
+  audio_path: string;
+  paragraph_count: number;
+  duration_seconds: number;
+  generated_at: string;
+};
+
 export type ImportSummary = {
   imported: number;
   skipped: number;
