@@ -64,15 +64,27 @@ pub fn read_epub(path: &Path) -> Result<ExtractedBook> {
 
     let title = metadata_text(&opf_doc, "title")
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| path.file_stem().and_then(|value| value.to_str()).unwrap_or("Book").to_string());
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Book")
+                .to_string()
+        });
     let author = metadata_text(&opf_doc, "creator").unwrap_or_default();
     let manifest = read_manifest(&opf_doc);
-    let manifest_by_id: HashMap<String, ManifestItem> = manifest.iter().cloned().map(|item| (item.id.clone(), item)).collect();
+    let manifest_by_id: HashMap<String, ManifestItem> = manifest
+        .iter()
+        .cloned()
+        .map(|item| (item.id.clone(), item))
+        .collect();
     let toc_labels = read_toc_labels(&mut zip, &opf_base, &manifest).unwrap_or_default();
     let cover = find_cover(&mut zip, &opf_base, &opf_doc, &manifest, &manifest_by_id);
 
     let mut chapters = Vec::new();
-    for itemref in opf_doc.descendants().filter(|node| node.tag_name().name() == "itemref") {
+    for itemref in opf_doc
+        .descendants()
+        .filter(|node| node.tag_name().name() == "itemref")
+    {
         let Some(idref) = itemref.attribute("idref") else {
             continue;
         };
@@ -86,7 +98,7 @@ pub fn read_epub(path: &Path) -> Result<ExtractedBook> {
         let zip_path = join_zip_path(&opf_base, &item.href);
         let content = read_zip_text(&mut zip, &zip_path)
             .with_context(|| format!("Unable to read chapter {}", item.href))?;
-        let blocks = parse_chapter_blocks(&content);
+        let blocks = parse_chapter_blocks(&content, &zip_dirname(&zip_path));
         if blocks.is_empty() {
             continue;
         }
@@ -115,7 +127,15 @@ pub fn read_chapter_blocks(path: &Path, source_href: &str) -> Result<Vec<Extract
     let zip_path = find_zip_entry(&mut zip, source_href)
         .ok_or_else(|| anyhow!("Unable to find chapter {source_href} in EPUB."))?;
     let content = read_zip_text(&mut zip, &zip_path)?;
-    Ok(parse_chapter_blocks(&content))
+    Ok(parse_chapter_blocks(&content, &zip_dirname(&zip_path)))
+}
+
+pub fn read_asset_bytes(path: &Path, asset_path: &str) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let mut zip = ZipArchive::new(file)?;
+    let zip_path = find_zip_entry(&mut zip, asset_path)
+        .ok_or_else(|| anyhow!("Unable to find asset {asset_path} in EPUB."))?;
+    read_zip_bytes(&mut zip, &zip_path)
 }
 
 fn read_zip_text(zip: &mut ZipArchive<File>, path: &str) -> Result<String> {
@@ -178,7 +198,10 @@ fn read_toc_labels(
     let content = read_zip_text(zip, &toc_path)?;
     let doc = Document::parse(&content)?;
     let mut labels = HashMap::new();
-    for nav_point in doc.descendants().filter(|node| node.tag_name().name() == "navPoint") {
+    for nav_point in doc
+        .descendants()
+        .filter(|node| node.tag_name().name() == "navPoint")
+    {
         let label = nav_point
             .descendants()
             .find(|node| node.tag_name().name() == "text")
@@ -207,13 +230,26 @@ fn find_cover(
 ) -> Option<ExtractedCover> {
     let metadata_cover_id = doc
         .descendants()
-        .find(|node| node.tag_name().name() == "meta" && node.attribute("name").is_some_and(|value| value.eq_ignore_ascii_case("cover")))
+        .find(|node| {
+            node.tag_name().name() == "meta"
+                && node
+                    .attribute("name")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("cover"))
+        })
         .and_then(|node| node.attribute("content"));
     let candidates = [
         metadata_cover_id.and_then(|id| manifest_by_id.get(id)),
-        manifest.iter().find(|item| item.properties.split_whitespace().any(|value| value == "cover-image")),
-        manifest.iter().find(|item| item.href.to_lowercase().contains("cover") && item.media_type.starts_with("image/")),
-        manifest.iter().find(|item| item.media_type.starts_with("image/")),
+        manifest.iter().find(|item| {
+            item.properties
+                .split_whitespace()
+                .any(|value| value == "cover-image")
+        }),
+        manifest.iter().find(|item| {
+            item.href.to_lowercase().contains("cover") && item.media_type.starts_with("image/")
+        }),
+        manifest
+            .iter()
+            .find(|item| item.media_type.starts_with("image/")),
     ];
 
     for candidate in candidates.into_iter().flatten() {
@@ -225,24 +261,30 @@ fn find_cover(
     None
 }
 
-fn parse_chapter_blocks(content: &str) -> Vec<ExtractedBlock> {
+fn parse_chapter_blocks(content: &str, chapter_base: &str) -> Vec<ExtractedBlock> {
     let document = Html::parse_document(content);
-    let selector = Selector::parse("p, div, li, h1, h2, h3, h4, img").expect("valid chapter block selector");
+    let selector =
+        Selector::parse("p, div, li, h1, h2, h3, h4, img").expect("valid chapter block selector");
     document
         .select(&selector)
         .filter(|element| !is_redundant_container(element))
-        .filter_map(parse_chapter_block)
+        .filter_map(|element| parse_chapter_block(element, chapter_base))
         .collect()
 }
 
-fn parse_chapter_block(element: ElementRef<'_>) -> Option<ExtractedBlock> {
+fn parse_chapter_block(element: ElementRef<'_>, chapter_base: &str) -> Option<ExtractedBlock> {
     if element.value().name() == "img" {
         let source = element.value().attr("src")?;
         return Some(ExtractedBlock {
             kind: ExtractedBlockKind::Image,
             text: String::new(),
-            asset_path: Some(normalize_zip_path(source)),
-            alt: element.value().attr("alt").unwrap_or_default().trim().to_string(),
+            asset_path: Some(join_zip_path(chapter_base, source)),
+            alt: element
+                .value()
+                .attr("alt")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         });
     }
 
@@ -264,8 +306,10 @@ fn is_redundant_container(element: &ElementRef<'_>) -> bool {
 fn has_readable_descendant(element: &ElementRef<'_>) -> bool {
     element.children().any(|child| {
         ElementRef::wrap(child).is_some_and(|child_element| {
-            matches!(child_element.value().name(), "p" | "li" | "h1" | "h2" | "h3" | "h4" | "img")
-                || has_readable_descendant(&child_element)
+            matches!(
+                child_element.value().name(),
+                "p" | "li" | "h1" | "h2" | "h3" | "h4" | "img"
+            ) || has_readable_descendant(&child_element)
         })
     })
 }
@@ -355,8 +399,14 @@ mod tests {
 
     #[test]
     fn normalizes_zip_paths() {
-        assert_eq!(normalize_zip_path("OPS/Text/../Images/cover.jpg"), "OPS/Images/cover.jpg");
-        assert_eq!(normalize_zip_path("./chapter\\one.xhtml"), "chapter/one.xhtml");
+        assert_eq!(
+            normalize_zip_path("OPS/Text/../Images/cover.jpg"),
+            "OPS/Images/cover.jpg"
+        );
+        assert_eq!(
+            normalize_zip_path("./chapter\\one.xhtml"),
+            "chapter/one.xhtml"
+        );
     }
 
     #[test]
@@ -368,9 +418,20 @@ mod tests {
               <div>Loose paragraph in a div.</div>
             </body></html>
             "#,
+            "",
         );
-        let texts = blocks.into_iter().map(|block| block.text).collect::<Vec<_>>();
-        assert_eq!(texts, vec!["First paragraph.", "Second paragraph.", "Loose paragraph in a div."]);
+        let texts = blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "First paragraph.",
+                "Second paragraph.",
+                "Loose paragraph in a div."
+            ]
+        );
     }
 
     #[test]
@@ -381,8 +442,25 @@ mod tests {
               <div class="galley"><section><h1>4</h1><p>First paragraph.</p><p>Second paragraph.</p></section></div>
             </body></html>
             "#,
+            "",
         );
-        let texts = blocks.into_iter().map(|block| block.text).collect::<Vec<_>>();
+        let texts = blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>();
         assert_eq!(texts, vec!["4", "First paragraph.", "Second paragraph."]);
+    }
+
+    #[test]
+    fn resolves_image_paths_against_the_chapter_directory() {
+        let blocks = parse_chapter_blocks(
+            r#"<html><body><img src="../Images/plate01.jpg" alt="Plate"></body></html>"#,
+            "OPS/Text",
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0].kind, ExtractedBlockKind::Image));
+        assert_eq!(blocks[0].asset_path.as_deref(), Some("OPS/Images/plate01.jpg"));
+        assert_eq!(blocks[0].alt, "Plate");
     }
 }

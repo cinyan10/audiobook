@@ -10,6 +10,9 @@ import {
   MenuIcon,
   PauseIcon,
   PlayIcon,
+  XIcon,
+  ZoomInIcon,
+  ZoomOutIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -48,6 +51,11 @@ type AudioGenerationProgress = {
   total: number;
   percent: number;
   stage: string;
+};
+
+type ReaderImage = {
+  src: string;
+  alt: string;
 };
 
 function App() {
@@ -284,6 +292,8 @@ function ReaderView({
   const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
+  const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
+  const [imageZoom, setImageZoom] = useState(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -620,6 +630,29 @@ function ReaderView({
     [bookId],
   );
 
+  const openImage = useCallback((image: ReaderImage) => {
+    setImageZoom(1);
+    setDialogImage(image);
+  }, []);
+
+  const closeImage = useCallback(() => {
+    setDialogImage(null);
+    setImageZoom(1);
+  }, []);
+
+  useEffect(() => {
+    if (!dialogImage) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeImage();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closeImage, dialogImage]);
+
   const seekAudio = useCallback((time: number) => {
     const audio = audioRef.current;
     if (!audio) {
@@ -761,7 +794,14 @@ function ReaderView({
                           onToggleMarkedToken={toggleMarkedToken}
                         />
                       </p>
-                    ) : null,
+                    ) : (
+                      <ReaderFigure
+                        key={block.block_index}
+                        block={block}
+                        fallbackAlt={chapter.title}
+                        onOpen={openImage}
+                      />
+                    ),
                   )}
                 </div>
               </>
@@ -769,6 +809,14 @@ function ReaderView({
           </article>
         </div>
         <audio ref={audioRef} preload="metadata" className="hidden" />
+        {dialogImage ? (
+          <ImageDialog
+            image={dialogImage}
+            zoom={imageZoom}
+            onZoomChange={setImageZoom}
+            onClose={closeImage}
+          />
+        ) : null}
         {partAudio ? (
           <PartAudioPlayer
             playing={audioState.playing}
@@ -780,6 +828,105 @@ function ReaderView({
         ) : null}
       </main>
     </TooltipProvider>
+  );
+}
+
+function ReaderFigure({
+  block,
+  fallbackAlt,
+  onOpen,
+}: {
+  block: ChapterPayload["blocks"][number];
+  fallbackAlt: string;
+  onOpen: (image: ReaderImage) => void;
+}) {
+  if (!block.asset_path) {
+    return null;
+  }
+  const image = {
+    src: convertFileSrc(block.asset_path),
+    alt: block.alt || fallbackAlt,
+  };
+  return (
+    <figure
+      id={blockDomId(block.block_index)}
+      className="reader-figure"
+      data-reader-block
+      data-block-index={block.block_index}
+    >
+      <button
+        className="reader-image-button"
+        type="button"
+        onClick={() => onOpen(image)}
+        aria-label="Open image"
+      >
+        <img className="reader-image" src={image.src} alt={image.alt} />
+      </button>
+    </figure>
+  );
+}
+
+function ImageDialog({
+  image,
+  zoom,
+  onZoomChange,
+  onClose,
+}: {
+  image: ReaderImage;
+  zoom: number;
+  onZoomChange: (zoom: number) => void;
+  onClose: () => void;
+}) {
+  const setZoom = (value: number) => onZoomChange(Math.max(0.5, Math.min(3, value)));
+  return (
+    <div className="image-dialog-backdrop" onClick={onClose} role="presentation">
+      <dialog className="image-dialog" open onClick={(event) => event.stopPropagation()}>
+        <div className="image-dialog-toolbar" aria-label="Image controls">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="secondary" size="icon" onClick={() => setZoom(zoom - 0.25)} aria-label="Zoom out">
+                <ZoomOutIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Zoom out</TooltipContent>
+          </Tooltip>
+          <input
+            className="image-zoom-slider"
+            type="range"
+            min={0.5}
+            max={3}
+            step={0.05}
+            value={zoom}
+            onChange={(event) => setZoom(Number(event.target.value))}
+            aria-label="Image zoom"
+          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="secondary" size="icon" onClick={() => setZoom(zoom + 0.25)} aria-label="Zoom in">
+                <ZoomInIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Zoom in</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="secondary" size="icon" onClick={onClose} aria-label="Close image">
+                <XIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Close</TooltipContent>
+          </Tooltip>
+        </div>
+        <div className="image-dialog-viewport">
+          <img
+            className="image-dialog-image"
+            src={image.src}
+            alt={image.alt}
+            style={{ transform: `scale(${zoom})` }}
+          />
+        </div>
+      </dialog>
+    </div>
   );
 }
 

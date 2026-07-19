@@ -244,6 +244,15 @@ pub fn import_book(
     for (chapter_index, chapter) in extracted.chapters.iter().enumerate() {
         let start_block_index = block_index;
         for block in &chapter.blocks {
+            let asset_path = if matches!(block.kind, ExtractedBlockKind::Image) {
+                block
+                    .asset_path
+                    .as_deref()
+                    .and_then(|path| materialize_epub_asset(source_path, &assets_dir, path).ok().flatten())
+                    .or_else(|| block.asset_path.clone())
+            } else {
+                None
+            };
             tx.execute(
                 r#"
                 INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
@@ -258,7 +267,7 @@ pub fn import_book(
                         ExtractedBlockKind::Image => "image",
                     },
                     block.text,
-                    block.asset_path.clone(),
+                    asset_path,
                     block.alt.clone()
                 ],
             )?;
@@ -363,6 +372,14 @@ pub fn get_chapter(
         return Ok(None);
     };
 
+    let book_asset_source = connection
+        .query_row(
+            "SELECT stored_path, content_hash FROM books WHERE id = ?",
+            params![book_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+
     let mut statement = connection.prepare(
         r#"
         SELECT block_index, kind, text, asset_path, alt
@@ -387,7 +404,16 @@ pub fn get_chapter(
         },
     )?;
 
-    let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    if let Some((stored_path, content_hash)) = book_asset_source {
+        resolve_chapter_image_assets(
+            connection,
+            book_id,
+            Path::new(&stored_path),
+            &content_hash,
+            &mut blocks,
+        )?;
+    }
     let blocks = readable_chapter_blocks(&chapter.title, blocks)
         .into_iter()
         .map(with_cefr_tokens)
@@ -928,6 +954,76 @@ fn slugify(value: &str) -> String {
 
 fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn resolve_chapter_image_assets(
+    connection: &Connection,
+    book_id: i64,
+    stored_path: &Path,
+    content_hash: &str,
+    blocks: &mut [ChapterBlock],
+) -> Result<()> {
+    let Some(data_dir) = stored_path.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    let assets_dir = data_dir.join("assets").join(content_hash);
+
+    for block in blocks {
+        if block.kind != "image" {
+            continue;
+        }
+        let Some(asset_path) = block.asset_path.clone() else {
+            continue;
+        };
+        if Path::new(&asset_path).exists() {
+            continue;
+        }
+        if let Some(local_path) = materialize_epub_asset(stored_path, &assets_dir, &asset_path)? {
+            connection.execute(
+                "UPDATE chapter_blocks SET asset_path = ? WHERE book_id = ? AND block_index = ?",
+                params![local_path, book_id, block.block_index],
+            )?;
+            block.asset_path = Some(local_path);
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_epub_asset(
+    epub_path: &Path,
+    assets_dir: &Path,
+    asset_path: &str,
+) -> Result<Option<String>> {
+    if asset_path.trim().is_empty() || Path::new(asset_path).exists() {
+        return Ok(Some(asset_path.to_string()));
+    }
+
+    let bytes = match epub::read_asset_bytes(epub_path, asset_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    let local_path = assets_dir.join("images").join(normalized_relative_path(asset_path));
+    if let Some(parent) = local_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&local_path, bytes)?;
+    Ok(Some(path_to_string(local_path)))
+}
+
+fn normalized_relative_path(path: &str) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for part in path.replace('\\', "/").split('/') {
+        match part {
+            "" | "." | ".." => {}
+            value => relative.push(value),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        PathBuf::from("image")
+    } else {
+        relative
+    }
 }
 
 #[cfg(test)]
