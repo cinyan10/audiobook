@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -32,25 +31,11 @@ def emit_progress(stage: str, completed: int, total: int) -> None:
     )
 
 
-def normalize_for_speech(text: str) -> str:
-    replacements = {
-        "Hikigaya": "Hee-kee-gah-yah",
-        "Komachi": "Koh-mah-chee",
-        "Yukino": "Yoo-kee-no",
-        "Yukinoshita": "Yoo-kee-no-shee-tah",
-        "Yuigahama": "Yoo-ee-gah-hah-mah",
-        "Hachiman": "Hah-chee-mahn",
-    }
-    for source, spoken in replacements.items():
-        text = re.sub(rf"\b{re.escape(source)}\b", spoken, text)
-    return text
-
-
 def render_audio(pipeline: KPipeline, text: str, voice: str, speed: float) -> np.ndarray:
     chunks: list[np.ndarray] = []
 
     with torch.inference_mode():
-        for result in pipeline(normalize_for_speech(text), voice=voice, speed=speed):
+        for result in pipeline(text, voice=voice, speed=speed):
             if result.audio is None:
                 continue
             chunks.append(result.audio.detach().cpu().numpy())

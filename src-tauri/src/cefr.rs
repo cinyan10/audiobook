@@ -5,7 +5,8 @@ use csv::ReaderBuilder;
 use serde::Serialize;
 
 const CEFRJ_VOCABULARY: &str = include_str!("../assets/cefr/cefrj-vocabulary-profile-1.5.csv");
-const OCTANOVE_C1C2_VOCABULARY: &str = include_str!("../assets/cefr/octanove-vocabulary-profile-c1c2-1.0.csv");
+const OCTANOVE_C1C2_VOCABULARY: &str =
+    include_str!("../assets/cefr/octanove-vocabulary-profile-c1c2-1.0.csv");
 
 static PROFILE: LazyLock<HashMap<String, CefrLevel>> = LazyLock::new(load_profile);
 
@@ -120,10 +121,19 @@ fn load_profile() -> HashMap<String, CefrLevel> {
 fn load_profile_csv(profile: &mut HashMap<String, CefrLevel>, source: &str) {
     let mut reader = ReaderBuilder::new().from_reader(source.as_bytes());
     let headers = reader.headers().expect("OLP CEFR CSV headers").clone();
-    let headword_index = headers.iter().position(|header| header == "headword").expect("OLP CEFR CSV headword column");
-    let cefr_index = headers.iter().position(|header| header == "CEFR").expect("OLP CEFR CSV CEFR column");
+    let headword_index = headers
+        .iter()
+        .position(|header| header == "headword")
+        .expect("OLP CEFR CSV headword column");
+    let cefr_index = headers
+        .iter()
+        .position(|header| header == "CEFR")
+        .expect("OLP CEFR CSV CEFR column");
 
-    for record in reader.records().map(|record| record.expect("OLP CEFR CSV record")) {
+    for record in reader
+        .records()
+        .map(|record| record.expect("OLP CEFR CSV record"))
+    {
         let Some(level) = record.get(cefr_index).and_then(CefrLevel::parse) else {
             continue;
         };
@@ -131,7 +141,9 @@ fn load_profile_csv(profile: &mut HashMap<String, CefrLevel>, source: &str) {
             continue;
         };
         for variant in headword_variants(headword) {
-            let replace = profile.get(&variant).is_none_or(|previous| level.rank() < previous.rank());
+            let replace = profile
+                .get(&variant)
+                .is_none_or(|previous| level.rank() < previous.rank());
             if replace {
                 profile.insert(variant, level);
             }
@@ -217,7 +229,9 @@ fn root_word(word: &str) -> String {
 fn normalize_word_text(text: &str) -> String {
     let normalized = text.trim().replace('’', "'").to_ascii_lowercase();
     if normalized.is_empty()
-        || !normalized.chars().any(|character| character.is_ascii_alphanumeric())
+        || !normalized
+            .chars()
+            .any(|character| character.is_ascii_alphanumeric())
         || !normalized.chars().all(is_word_character)
     {
         return String::new();
@@ -230,12 +244,15 @@ fn is_word_character(character: char) -> bool {
 }
 
 fn unique(values: Vec<String>) -> Vec<String> {
-    values.into_iter().filter(|value| !value.is_empty()).fold(Vec::new(), |mut unique, value| {
-        if !unique.contains(&value) {
-            unique.push(value);
-        }
-        unique
-    })
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .fold(Vec::new(), |mut unique, value| {
+            if !unique.contains(&value) {
+                unique.push(value);
+            }
+            unique
+        })
 }
 
 fn contraction_root(word: &str) -> Option<&'static str> {
@@ -359,7 +376,10 @@ mod tests {
     #[test]
     fn tokenization_preserves_source_text() {
         let text = "World, can't stop running.";
-        let rendered = tokenize_text(text).into_iter().map(|token| token.text).collect::<String>();
+        let rendered = tokenize_text(text)
+            .into_iter()
+            .map(|token| token.text)
+            .collect::<String>();
         assert_eq!(rendered, text);
     }
 }
