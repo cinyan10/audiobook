@@ -399,7 +399,7 @@ svg {
 .reader-heading h2 {
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(2rem, 5vw, 4rem);
+  font-size: clamp(1.65rem, 3.5vw, 2.75rem);
   font-weight: 500;
   line-height: 1.05;
 }
@@ -413,6 +413,7 @@ svg {
 .part-stats {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.45rem;
   color: oklch(var(--muted-foreground));
   font-size: 0.78rem;
@@ -425,6 +426,11 @@ svg {
   align-items: center;
   border-left: 1px solid oklch(var(--border));
   padding-left: 0.6rem;
+}
+
+.part-stats .part-label {
+  border-left: 0;
+  padding-left: 0;
 }
 
 .reader-audio {

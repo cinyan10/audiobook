@@ -972,8 +972,8 @@ function ReaderView({
               <>
                 <div className="reader-heading">
                   <h2>{chapter.title}</h2>
-                  {activePart && activeChapter && activeChapter.parts.length > 1 ? <span>{activePart.title}</span> : null}
                   <div className="part-stats" aria-label="Part statistics">
+                    {activePart && activeChapter && activeChapter.parts.length > 1 ? <span className="part-label">{activePart.title}</span> : null}
                     <span>{partWordCount.toLocaleString()} words</span>
                     {partAudio ? (
                       <AlertDialog>
@@ -1021,7 +1021,6 @@ function ReaderView({
                       </Button>
                     ) : null}
                     {loadingAlignment ? <span>Loading word sync</span> : null}
-                    {!loadingAlignment && partAlignment ? <span>{partAlignment.mapped_token_count.toLocaleString()} words synced</span> : null}
                     {!loadingAlignment && !partAlignment && partAudio?.alignment_error ? <span>Word sync unavailable</span> : null}
                   </div>
                 </div>
