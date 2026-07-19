@@ -488,6 +488,13 @@ svg {
   background: transparent;
 }
 
+.reader-token.marked {
+  background: #fff200;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  color: #2c40d0;
+}
+
 .reader-token.level-a1 {
   color: #0069b4;
 }
@@ -510,6 +517,11 @@ svg {
 
 .reader-token.level-c2 {
   color: #475569;
+}
+
+.reader-token.marked,
+.reader-token.marked[class*="level-"] {
+  color: #2c40d0;
 }
 
 @media (max-width: 900px) {

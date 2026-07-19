@@ -283,6 +283,7 @@ function ReaderView({
   const [generatingAudio, setGeneratingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
+  const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -390,6 +391,20 @@ function ReaderView({
       }
     };
   }, [bookId, chapter, chapterIndex, partIndex, reader]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(markedTokensStorageKey(bookId));
+    if (!stored) {
+      setMarkedTokens(new Set());
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored);
+      setMarkedTokens(Array.isArray(parsed) ? new Set(parsed.filter((item) => typeof item === "string")) : new Set());
+    } catch {
+      setMarkedTokens(new Set());
+    }
+  }, [bookId]);
 
   const activeChapter = useMemo(
     () => reader?.chapters.find((item) => item.chapter_index === chapterIndex),
@@ -577,6 +592,34 @@ function ReaderView({
     }
   }, [partAudio]);
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.repeat || shouldIgnorePlaybackShortcut(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      toggleAudioPlay();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggleAudioPlay]);
+
+  const toggleMarkedToken = useCallback(
+    (tokenKey: string) => {
+      setMarkedTokens((current) => {
+        const next = new Set(current);
+        if (next.has(tokenKey)) {
+          next.delete(tokenKey);
+        } else {
+          next.add(tokenKey);
+        }
+        window.localStorage.setItem(markedTokensStorageKey(bookId), JSON.stringify([...next]));
+        return next;
+      });
+    },
+    [bookId],
+  );
+
   const seekAudio = useCallback((time: number) => {
     const audio = audioRef.current;
     if (!audio) {
@@ -711,7 +754,12 @@ function ReaderView({
                         data-reader-block
                         data-block-index={block.block_index}
                       >
-                        <ReaderTokens block={block} />
+                        <ReaderTokens
+                          block={block}
+                          chapterIndex={chapterIndex}
+                          markedTokens={markedTokens}
+                          onToggleMarkedToken={toggleMarkedToken}
+                        />
                       </p>
                     ) : null,
                   )}
@@ -828,24 +876,60 @@ function formatClock(seconds: number) {
   return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
-function ReaderTokens({ block }: { block: ChapterPayload["blocks"][number] }) {
+function ReaderTokens({
+  block,
+  chapterIndex,
+  markedTokens,
+  onToggleMarkedToken,
+}: {
+  block: ChapterPayload["blocks"][number];
+  chapterIndex: number;
+  markedTokens: Set<string>;
+  onToggleMarkedToken: (tokenKey: string) => void;
+}) {
   if (!block.tokens.length) {
     return <>{block.text}</>;
   }
   return (
     <>
-      {block.tokens.map((token, index) => (
-        <span
-          key={`${block.block_index}-${index}`}
-          className={cn("reader-token", token.cefr_level && `level-${token.cefr_level.toLowerCase()}`)}
-          data-cefr-level={token.cefr_level || undefined}
-          data-root-text={token.root_text || undefined}
-        >
-          {token.text}
-        </span>
-      ))}
+      {block.tokens.map((token, index) => {
+        const tokenKey = markedTokenKey(chapterIndex, block.block_index, index);
+        return (
+          <span
+            key={`${block.block_index}-${index}`}
+            className={cn(
+              "reader-token",
+              token.cefr_level && `level-${token.cefr_level.toLowerCase()}`,
+              markedTokens.has(tokenKey) && "marked",
+            )}
+            data-cefr-level={token.cefr_level || undefined}
+            data-root-text={token.root_text || undefined}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onToggleMarkedToken(tokenKey);
+            }}
+          >
+            {token.text}
+          </span>
+        );
+      })}
     </>
   );
+}
+
+function markedTokenKey(chapterIndex: number, blockIndex: number, tokenIndex: number) {
+  return `${chapterIndex}:${blockIndex}:${tokenIndex}`;
+}
+
+function markedTokensStorageKey(bookId: number) {
+  return `readalong:marked-tokens:${bookId}`;
+}
+
+function shouldIgnorePlaybackShortcut(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }
 
 function errorMessage(error: unknown, fallback: string) {
