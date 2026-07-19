@@ -21,13 +21,23 @@ export type ChapterSummary = {
   title: string;
   start_block_index: number;
   end_block_index: number;
+  progress_start_unit: number;
+  progress_end_unit: number;
+  progress_units: number;
+  contributes_to_progress: boolean;
   parts: ChapterPartSummary[];
 };
 
 export type ReadingProgress = {
   last_read_at: string | null;
   last_chapter_index: number;
+  last_part_index: number;
   last_block_index: number;
+  last_scroll_ratio: number;
+  last_audio_time_seconds: number | null;
+  last_audio_duration_seconds: number | null;
+  last_playing_block_index: number | null;
+  last_playing_token_index: number | null;
   progress_percent: number;
 };
 
@@ -39,6 +49,7 @@ export type ReaderPayload = {
   chapters: ChapterSummary[];
   progress: ReadingProgress;
   total_blocks: number;
+  total_progress_units: number;
 };
 
 export type ChapterBlock = {

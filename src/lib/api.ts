@@ -44,11 +44,30 @@ export function syncPartAlignment(bookId: number, chapterIndex: number, partInde
   });
 }
 
-export function saveProgress(bookId: number, chapterIndex: number, blockIndex: number, progressPercent: number) {
+export type SaveProgressInput = {
+  bookId: number;
+  chapterIndex: number;
+  partIndex: number;
+  blockIndex: number;
+  scrollRatio: number;
+  progressPercent: number;
+  audioTimeSeconds?: number | null;
+  audioDurationSeconds?: number | null;
+  lastPlayingBlockIndex?: number | null;
+  lastPlayingTokenIndex?: number | null;
+};
+
+export function saveProgress(input: SaveProgressInput) {
   return invoke<void>("save_progress", {
-    bookId,
-    chapterIndex,
-    blockIndex,
-    progressPercent,
+    bookId: input.bookId,
+    chapterIndex: input.chapterIndex,
+    partIndex: input.partIndex,
+    blockIndex: input.blockIndex,
+    scrollRatio: input.scrollRatio,
+    progressPercent: input.progressPercent,
+    audioTimeSeconds: input.audioTimeSeconds ?? null,
+    audioDurationSeconds: input.audioDurationSeconds ?? null,
+    lastPlayingBlockIndex: input.lastPlayingBlockIndex ?? null,
+    lastPlayingTokenIndex: input.lastPlayingTokenIndex ?? null,
   });
 }

@@ -28,6 +28,10 @@ pub struct ChapterSummary {
     pub title: String,
     pub start_block_index: i64,
     pub end_block_index: i64,
+    pub progress_start_unit: i64,
+    pub progress_end_unit: i64,
+    pub progress_units: i64,
+    pub contributes_to_progress: bool,
     pub parts: Vec<ChapterPartSummary>,
 }
 
@@ -35,7 +39,13 @@ pub struct ChapterSummary {
 pub struct ReadingProgress {
     pub last_read_at: Option<String>,
     pub last_chapter_index: i64,
+    pub last_part_index: i64,
     pub last_block_index: i64,
+    pub last_scroll_ratio: f64,
+    pub last_audio_time_seconds: Option<f64>,
+    pub last_audio_duration_seconds: Option<f64>,
+    pub last_playing_block_index: Option<i64>,
+    pub last_playing_token_index: Option<i64>,
     pub progress_percent: f64,
 }
 
@@ -48,6 +58,7 @@ pub struct ReaderPayload {
     pub chapters: Vec<ChapterSummary>,
     pub progress: ReadingProgress,
     pub total_blocks: i64,
+    pub total_progress_units: i64,
 }
 
 #[derive(Debug, Serialize)]

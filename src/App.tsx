@@ -28,7 +28,7 @@ import {
   saveProgress,
   syncPartAlignment,
 } from "@/lib/api";
-import type { BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, TimedToken } from "@/types";
+import type { BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress, TimedToken } from "@/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -66,6 +66,18 @@ type AudioGenerationProgress = {
 type ReaderImage = {
   src: string;
   alt: string;
+};
+
+type PendingResume = {
+  progress: ReadingProgress;
+};
+
+type SaveProgressOptions = {
+  immediate?: boolean;
+  blockIndex?: number;
+  audioTimeSeconds?: number | null;
+  audioDurationSeconds?: number | null;
+  lastPlayingToken?: TimedToken | null;
 };
 
 function App() {
@@ -144,7 +156,6 @@ function App() {
           setView({
             kind: "reader",
             bookId: book.id,
-            chapterIndex: 0,
           })
         }
       />
@@ -312,8 +323,14 @@ function ReaderView({
   const wordPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const lastAudioSaveAtRef = useRef(0);
+  const pendingResumeRef = useRef<PendingResume | null>(null);
+  const pendingAudioResumeTimeRef = useRef<number | null>(null);
+  const audioLookupPendingRef = useRef(false);
+  const alignmentLookupPendingRef = useRef(false);
   const pendingPartBlockRef = useRef<number | null>(null);
   const tokenRefs = useRef<Record<string, HTMLElement | null>>({});
+  const activeTimedTokenRef = useRef<TimedToken | null>(null);
   const wordPreviewEndTimeRef = useRef<number | null>(null);
   const lastAutoScrollTokenRef = useRef<string | null>(null);
   const lastSelectionSeekKeyRef = useRef("");
@@ -327,15 +344,20 @@ function ReaderView({
           return;
         }
         setReader(payload);
-        const savedChapterIndex = initialChapterIndex ?? payload.progress.last_chapter_index ?? 0;
+        const shouldResume = initialChapterIndex === undefined;
+        pendingResumeRef.current = shouldResume ? { progress: payload.progress } : null;
+        const savedChapterIndex = shouldResume ? payload.progress.last_chapter_index : initialChapterIndex;
         const nextChapterIndex = payload.chapters.some((item) => item.chapter_index === savedChapterIndex) ? savedChapterIndex : 0;
         const nextChapter = payload.chapters.find((item) => item.chapter_index === nextChapterIndex);
-        const nextPartIndex =
-          nextChapter?.parts.find(
-            (part) =>
-              payload.progress.last_block_index >= part.start_block_index &&
-              payload.progress.last_block_index <= part.end_block_index,
-          )?.part_index ?? 0;
+        const savedPart = shouldResume ? nextChapter?.parts.find((part) => part.part_index === payload.progress.last_part_index) : null;
+        const blockPart = shouldResume
+          ? nextChapter?.parts.find(
+              (part) =>
+                payload.progress.last_block_index >= part.start_block_index &&
+                payload.progress.last_block_index <= part.end_block_index,
+            )
+          : null;
+        const nextPartIndex = savedPart?.part_index ?? blockPart?.part_index ?? 0;
         setChapterIndex(nextChapterIndex);
         setPartIndex(nextPartIndex);
       })
@@ -351,6 +373,10 @@ function ReaderView({
   }, [bookId, initialChapterIndex]);
 
   useEffect(() => {
+    if (!reader) {
+      setChapter(null);
+      return;
+    }
     let cancelled = false;
     setChapter(null);
     void getChapter(bookId, chapterIndex)
@@ -363,63 +389,7 @@ function ReaderView({
     return () => {
       cancelled = true;
     };
-  }, [bookId, chapterIndex]);
-
-  useEffect(() => {
-    if (!reader || !chapter) {
-      return;
-    }
-    const pendingPartBlock = pendingPartBlockRef.current;
-    pendingPartBlockRef.current = null;
-    const partTarget = pendingPartBlock === null ? null : chapter.blocks.find((block) => block.block_index >= pendingPartBlock);
-    const target = partTarget ?? chapter.blocks.find((block) => block.block_index >= reader.progress.last_block_index);
-    if (target && (partTarget || chapterIndex === reader.progress.last_chapter_index)) {
-      window.requestAnimationFrame(() => {
-        document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
-      });
-    } else {
-      window.scrollTo({ top: 0 });
-    }
-  }, [chapter, chapterIndex, reader]);
-
-  useEffect(() => {
-    if (!reader || !chapter) {
-      return;
-    }
-    const blocks = Array.from(document.querySelectorAll<HTMLElement>("[data-reader-block]"));
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-        if (!visible) {
-          return;
-        }
-        const blockIndex = Number((visible.target as HTMLElement).dataset.blockIndex);
-        if (!Number.isFinite(blockIndex) || blockIndex === visibleBlockRef.current) {
-          return;
-        }
-        visibleBlockRef.current = blockIndex;
-        if (saveTimerRef.current) {
-          window.clearTimeout(saveTimerRef.current);
-        }
-        saveTimerRef.current = window.setTimeout(() => {
-          const percent = reader.total_blocks ? Math.min(100, Math.round((blockIndex / reader.total_blocks) * 1000) / 10) : 0;
-          void saveProgress(bookId, chapterIndex, blockIndex, percent).catch((error) => {
-            toast.error(errorMessage(error, "Failed to save progress."));
-          });
-        }, 900);
-      },
-      { rootMargin: "-35% 0px -50% 0px", threshold: [0.2, 0.6, 1] },
-    );
-    blocks.forEach((block) => observer.observe(block));
-    return () => {
-      observer.disconnect();
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, [bookId, chapter, chapterIndex, partIndex, reader]);
+  }, [bookId, chapterIndex, reader]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(markedTokensStorageKey(bookId));
@@ -470,12 +440,109 @@ function ReaderView({
     return tokens;
   }, [partAlignment]);
 
+  const saveCurrentProgress = useCallback(
+    (options: SaveProgressOptions = {}) => {
+      if (!reader || !activePart || pendingResumeRef.current || pendingAudioResumeTimeRef.current !== null) {
+        return;
+      }
+      const audio = audioRef.current;
+      const blockIndex = options.blockIndex ?? visibleBlockRef.current ?? activePart.start_block_index;
+      const progressChapter = reader.chapters.find(
+        (chapter) => blockIndex >= chapter.start_block_index && blockIndex <= chapter.end_block_index,
+      );
+      const progressPart = progressChapter?.parts.find(
+        (part) => blockIndex >= part.start_block_index && blockIndex <= part.end_block_index,
+      );
+      const progressPercent = readingProgressPercent(reader, chapter, blockIndex);
+      const audioDuration =
+        options.audioDurationSeconds ??
+        (partAudio && audio && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null);
+      const audioTime =
+        options.audioTimeSeconds ??
+        (partAudio && audio && Number.isFinite(audio.currentTime) ? audio.currentTime : null);
+      const lastPlayingToken = partAlignment?.tokens.length
+        ? options.lastPlayingToken === undefined
+          ? activeTimedTokenRef.current
+          : options.lastPlayingToken
+        : null;
+      const payload = {
+        bookId,
+        chapterIndex: progressChapter?.chapter_index ?? chapterIndex,
+        partIndex: progressPart?.part_index ?? activePart.part_index,
+        blockIndex,
+        scrollRatio: currentScrollRatio(),
+        progressPercent,
+        audioTimeSeconds: audioTime,
+        audioDurationSeconds: audioDuration,
+        lastPlayingBlockIndex: lastPlayingToken?.block_index ?? null,
+        lastPlayingTokenIndex: lastPlayingToken?.token_index ?? null,
+      };
+
+      const persist = () => {
+        void saveProgress(payload).catch((error) => {
+          toast.error(errorMessage(error, "Failed to save progress."));
+        });
+      };
+
+      if (options.immediate) {
+        if (saveTimerRef.current) {
+          window.clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = null;
+        }
+        persist();
+        return;
+      }
+
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      saveTimerRef.current = window.setTimeout(() => {
+        saveTimerRef.current = null;
+        persist();
+      }, 900);
+    },
+    [activePart, bookId, chapter, chapterIndex, partAlignment, partAudio, reader],
+  );
+
   useEffect(() => {
     tokenRefs.current = {};
     lastAutoScrollTokenRef.current = null;
     lastSelectionSeekKeyRef.current = "";
+    activeTimedTokenRef.current = null;
     setActiveTokenKey(null);
   }, [chapterIndex, partIndex]);
+
+  useEffect(() => {
+    if (!reader || !chapter) {
+      return;
+    }
+    const blocks = Array.from(document.querySelectorAll<HTMLElement>("[data-reader-block]"));
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) {
+          return;
+        }
+        const blockIndex = Number((visible.target as HTMLElement).dataset.blockIndex);
+        if (!Number.isFinite(blockIndex) || blockIndex === visibleBlockRef.current) {
+          return;
+        }
+        visibleBlockRef.current = blockIndex;
+        saveCurrentProgress({ blockIndex });
+      },
+      { rootMargin: "-35% 0px -50% 0px", threshold: [0.2, 0.6, 1] },
+    );
+    blocks.forEach((block) => observer.observe(block));
+    return () => observer.disconnect();
+  }, [chapter, reader, saveCurrentProgress]);
+
+  useEffect(() => {
+    const handleScroll = () => saveCurrentProgress();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [saveCurrentProgress]);
 
   useEffect(() => {
     if (!activePart) {
@@ -514,12 +581,14 @@ function ReaderView({
     setPartAudio(null);
     setAudioProgress(null);
     setAudioState({ currentTime: 0, duration: 0, playing: false });
+    audioLookupPendingRef.current = false;
 
     if (!reader || !chapter || !activePart) {
       return;
     }
 
     let cancelled = false;
+    audioLookupPendingRef.current = true;
     setLoadingAudio(true);
     void getPartAudio(bookId, chapterIndex, activePart.part_index)
       .then((payload) => {
@@ -530,6 +599,7 @@ function ReaderView({
       .catch((error) => toast.error(errorMessage(error, "Failed to check part audio.")))
       .finally(() => {
         if (!cancelled) {
+          audioLookupPendingRef.current = false;
           setLoadingAudio(false);
         }
       });
@@ -563,11 +633,13 @@ function ReaderView({
     setPartAlignment(null);
     setActiveTokenKey(null);
     lastAutoScrollTokenRef.current = null;
+    alignmentLookupPendingRef.current = false;
     if (!partAudio?.alignment_available || !activePart) {
       return;
     }
 
     let cancelled = false;
+    alignmentLookupPendingRef.current = true;
     setLoadingAlignment(true);
     void getPartAlignment(bookId, chapterIndex, activePart.part_index)
       .then((payload) => {
@@ -578,6 +650,7 @@ function ReaderView({
       .catch((error) => toast.error(errorMessage(error, "Failed to load word sync.")))
       .finally(() => {
         if (!cancelled) {
+          alignmentLookupPendingRef.current = false;
           setLoadingAlignment(false);
         }
       });
@@ -585,6 +658,111 @@ function ReaderView({
       cancelled = true;
     };
   }, [activePart, bookId, chapterIndex, partAudio]);
+
+  useEffect(() => {
+    const pending = pendingResumeRef.current;
+    if (!pending || !reader || !chapter || !activePart) {
+      return;
+    }
+
+    const finishRestore = () => {
+      pendingResumeRef.current = null;
+    };
+    const progress = pending.progress;
+
+    if (partAudio) {
+      const audio = audioRef.current;
+      const hasSavedAudioTime = progress.last_audio_time_seconds !== null;
+      if (hasSavedAudioTime) {
+        if (!audio || (audio.readyState < 1 && audioState.duration <= 0)) {
+          return;
+        }
+        const duration =
+          audioState.duration ||
+          (Number.isFinite(audio.duration) ? audio.duration : 0) ||
+          progress.last_audio_duration_seconds ||
+          progress.last_audio_time_seconds ||
+          0;
+        const resumeTime = clampNumber(progress.last_audio_time_seconds ?? 0, 0, duration);
+        pendingAudioResumeTimeRef.current = resumeTime;
+        audio.pause();
+        audio.currentTime = resumeTime;
+        setAudioState({
+          currentTime: resumeTime,
+          duration,
+          playing: false,
+        });
+        window.setTimeout(() => {
+          if (pendingAudioResumeTimeRef.current !== resumeTime) {
+            return;
+          }
+          if (Math.abs(audio.currentTime - resumeTime) > 0.25) {
+            audio.pause();
+            audio.currentTime = resumeTime;
+            setAudioState({
+              currentTime: resumeTime,
+              duration,
+              playing: false,
+            });
+          }
+          pendingAudioResumeTimeRef.current = null;
+        }, 500);
+      }
+
+      if (partAudio.alignment_available && (loadingAlignment || alignmentLookupPendingRef.current)) {
+        return;
+      }
+
+      if (partAlignment?.tokens.length) {
+        const savedToken = findSavedPlayingToken(partAlignment.tokens, progress);
+        const timeToken =
+          progress.last_audio_time_seconds === null ? null : timedTokenAtTime(partAlignment.tokens, progress.last_audio_time_seconds);
+        const targetToken = savedToken ?? timeToken;
+        if (targetToken) {
+          const key = timedTokenKey(targetToken.block_index, targetToken.token_index);
+          activeTimedTokenRef.current = targetToken;
+          visibleBlockRef.current = targetToken.block_index;
+          setActiveTokenKey(key);
+          scheduleScrollRestore(() => {
+            tokenRefs.current[key]?.scrollIntoView({ block: "center" });
+          });
+          finishRestore();
+          return;
+        }
+      }
+
+      restoreScrollPosition(progress, chapter);
+      finishRestore();
+      return;
+    }
+
+    if (loadingAudio || audioLookupPendingRef.current) {
+      return;
+    }
+
+    restoreScrollPosition(progress, chapter);
+    finishRestore();
+  }, [activePart, audioState.duration, chapter, loadingAlignment, loadingAudio, partAlignment, partAudio, reader]);
+
+  useEffect(() => {
+    if (!chapter || pendingResumeRef.current) {
+      return;
+    }
+    const pendingPartBlock = pendingPartBlockRef.current;
+    pendingPartBlockRef.current = null;
+    if (pendingPartBlock === null) {
+      return;
+    }
+    const target = chapter.blocks.find((block) => block.block_index >= pendingPartBlock);
+    if (!target) {
+      window.scrollTo({ top: 0 });
+      return;
+    }
+    visibleBlockRef.current = target.block_index;
+    scheduleScrollRestore(() => {
+      document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
+    });
+  }, [chapter]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -613,6 +791,41 @@ function ReaderView({
   }, []);
 
   useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !partAudio) {
+      return;
+    }
+
+    const savePlaybackPosition = (immediate: boolean) => {
+      saveCurrentProgress({
+        immediate,
+        audioTimeSeconds: audio.currentTime,
+        audioDurationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
+        lastPlayingToken: activeTimedTokenRef.current,
+      });
+    };
+    const saveThrottledPlaybackPosition = () => {
+      const now = Date.now();
+      if (now - lastAudioSaveAtRef.current < 2000) {
+        return;
+      }
+      lastAudioSaveAtRef.current = now;
+      savePlaybackPosition(false);
+    };
+    const saveImmediatePlaybackPosition = () => savePlaybackPosition(true);
+
+    audio.addEventListener("timeupdate", saveThrottledPlaybackPosition);
+    audio.addEventListener("pause", saveImmediatePlaybackPosition);
+    audio.addEventListener("seeked", saveImmediatePlaybackPosition);
+    return () => {
+      saveImmediatePlaybackPosition();
+      audio.removeEventListener("timeupdate", saveThrottledPlaybackPosition);
+      audio.removeEventListener("pause", saveImmediatePlaybackPosition);
+      audio.removeEventListener("seeked", saveImmediatePlaybackPosition);
+    };
+  }, [partAudio, saveCurrentProgress]);
+
+  useEffect(() => {
     const audio = wordPreviewAudioRef.current;
     if (!audio) {
       return;
@@ -633,6 +846,19 @@ function ReaderView({
       audio.removeEventListener("ended", clearEnd);
     };
   }, []);
+
+  useEffect(() => {
+    const saveBeforeUnload = () => saveCurrentProgress({ immediate: true });
+    window.addEventListener("beforeunload", saveBeforeUnload);
+    return () => {
+      saveBeforeUnload();
+      window.removeEventListener("beforeunload", saveBeforeUnload);
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [saveCurrentProgress]);
 
   const selectChapter = useCallback((nextChapterIndex: number, nextPartIndex = 0, startBlockIndex?: number) => {
     pendingPartBlockRef.current = startBlockIndex ?? null;
@@ -748,14 +974,24 @@ function ReaderView({
 
   useEffect(() => {
     if (!partAlignment?.tokens.length) {
+      activeTimedTokenRef.current = null;
       setActiveTokenKey(null);
       return;
     }
     const activeToken =
       partAlignment.tokens.find((token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time) ??
       [...partAlignment.tokens].reverse().find((token) => token.start_time <= audioState.currentTime);
+    activeTimedTokenRef.current = activeToken ?? null;
     const key = activeToken ? timedTokenKey(activeToken.block_index, activeToken.token_index) : null;
     setActiveTokenKey((current) => (current === key ? current : key));
+    if (audioState.playing && activeToken) {
+      saveCurrentProgress({
+        audioTimeSeconds: audioState.currentTime,
+        audioDurationSeconds: audioState.duration,
+        blockIndex: activeToken.block_index,
+        lastPlayingToken: activeToken,
+      });
+    }
 
     if (!audioState.playing || !key || lastAutoScrollTokenRef.current === key) {
       return;
@@ -773,7 +1009,7 @@ function ReaderView({
       lastAutoScrollTokenRef.current = key;
       element.scrollIntoView({ block: "center", behavior: "smooth" });
     }
-  }, [audioState.currentTime, audioState.playing, partAlignment]);
+  }, [audioState.currentTime, audioState.duration, audioState.playing, partAlignment, saveCurrentProgress]);
 
   const toggleMarkedToken = useCallback(
     (tokenKey: string) => {
@@ -1275,6 +1511,88 @@ function formatClock(seconds: number) {
   const minutes = Math.floor(whole / 60);
   const remainingSeconds = whole % 60;
   return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, value));
+}
+
+function currentScrollRatio() {
+  const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  if (maxScroll <= 0) {
+    return 0;
+  }
+  return clampNumber(window.scrollY / maxScroll, 0, 1);
+}
+
+function scheduleScrollRestore(callback: () => void) {
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(callback);
+  });
+}
+
+function restoreScrollPosition(progress: ReadingProgress, chapter: ChapterPayload) {
+  scheduleScrollRestore(() => {
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    if (maxScroll > 0 && progress.last_read_at) {
+      window.scrollTo({ top: clampNumber(progress.last_scroll_ratio, 0, 1) * maxScroll });
+      return;
+    }
+
+    const target = chapter.blocks.find((block) => block.block_index >= progress.last_block_index);
+    if (target) {
+      document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
+    } else {
+      window.scrollTo({ top: 0 });
+    }
+  });
+}
+
+function readingProgressPercent(reader: ReaderPayload, chapter: ChapterPayload | null, blockIndex: number) {
+  if (reader.total_progress_units <= 0) {
+    return reader.progress.progress_percent;
+  }
+
+  const progressChapter = reader.chapters.find(
+    (item) => blockIndex >= item.start_block_index && blockIndex <= item.end_block_index,
+  );
+  if (!progressChapter) {
+    return reader.progress.progress_percent;
+  }
+
+  let currentUnits = progressChapter.progress_start_unit;
+  if (progressChapter.contributes_to_progress && chapter?.chapter_index === progressChapter.chapter_index) {
+    currentUnits += chapter.blocks
+      .filter((block) => block.kind === "paragraph" && block.block_index < blockIndex)
+      .reduce((total, block) => total + block.text.length, 0);
+  }
+
+  const percent = (currentUnits / reader.total_progress_units) * 100;
+  return Math.min(100, Math.max(0, Math.round(percent * 10) / 10));
+}
+
+function findSavedPlayingToken(tokens: TimedToken[], progress: ReadingProgress) {
+  if (progress.last_playing_block_index === null || progress.last_playing_token_index === null) {
+    return null;
+  }
+  return (
+    tokens.find(
+      (token) =>
+        token.block_index === progress.last_playing_block_index &&
+        token.token_index === progress.last_playing_token_index,
+    ) ?? null
+  );
+}
+
+function timedTokenAtTime(tokens: TimedToken[], time: number) {
+  return (
+    tokens.find((token) => time >= token.start_time && time < token.end_time) ??
+    [...tokens].reverse().find((token) => token.start_time <= time) ??
+    null
+  );
 }
 
 function ReaderTokens({

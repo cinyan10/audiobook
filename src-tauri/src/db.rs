@@ -53,7 +53,13 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
     last_read_at TEXT NOT NULL,
     last_chapter_index INTEGER NOT NULL DEFAULT 0,
+    last_part_index INTEGER NOT NULL DEFAULT 0,
     last_block_index INTEGER NOT NULL DEFAULT 0,
+    last_scroll_ratio REAL NOT NULL DEFAULT 0,
+    last_audio_time_seconds REAL,
+    last_audio_duration_seconds REAL,
+    last_playing_block_index INTEGER,
+    last_playing_token_index INTEGER,
     progress_percent REAL NOT NULL DEFAULT 0
 );
 
@@ -143,7 +149,51 @@ pub fn connect(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.execute_batch(SCHEMA)?;
+    migrate_reading_progress(&connection)?;
     Ok(connection)
+}
+
+fn migrate_reading_progress(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(reading_progress)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_column = |name: &str| columns.iter().any(|column| column == name);
+
+    let migrations = [
+        (
+            "last_part_index",
+            "ALTER TABLE reading_progress ADD COLUMN last_part_index INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_scroll_ratio",
+            "ALTER TABLE reading_progress ADD COLUMN last_scroll_ratio REAL NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_audio_time_seconds",
+            "ALTER TABLE reading_progress ADD COLUMN last_audio_time_seconds REAL",
+        ),
+        (
+            "last_audio_duration_seconds",
+            "ALTER TABLE reading_progress ADD COLUMN last_audio_duration_seconds REAL",
+        ),
+        (
+            "last_playing_block_index",
+            "ALTER TABLE reading_progress ADD COLUMN last_playing_block_index INTEGER",
+        ),
+        (
+            "last_playing_token_index",
+            "ALTER TABLE reading_progress ADD COLUMN last_playing_token_index INTEGER",
+        ),
+    ];
+
+    for (column, sql) in migrations {
+        if !has_column(column) {
+            connection.execute(sql, [])?;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
@@ -156,6 +206,7 @@ pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
             b.cover_asset_path,
             COALESCE(rp.progress_percent, 0.0) AS progress_percent,
             rp.last_read_at,
+            rp.last_block_index,
             b.created_at,
             b.updated_at
         FROM books b
@@ -164,19 +215,33 @@ pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
         "#,
     )?;
     let rows = statement.query_map([], |row| {
-        Ok(BookSummary {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            author: row.get(2)?,
-            cover_asset_path: row.get(3)?,
-            progress_percent: row.get(4)?,
-            last_read_at: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        })
+        Ok((
+            BookSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                author: row.get(2)?,
+                cover_asset_path: row.get(3)?,
+                progress_percent: row.get(4)?,
+                last_read_at: row.get(5)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            },
+            row.get::<_, Option<i64>>(6)?,
+        ))
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(mut book, last_block_index)| {
+            if let Some(block_index) = last_block_index {
+                if let Some(percent) =
+                    progress_percent_for_block(connection, book.id, block_index)?
+                {
+                    book.progress_percent = percent;
+                }
+            }
+            Ok(book)
+        })
+        .collect()
 }
 
 pub fn import_book(
@@ -329,6 +394,10 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
     };
 
     let chapters = chapter_summaries(connection, book_id)?;
+    let total_progress_units = chapters
+        .iter()
+        .map(|chapter| chapter.progress_units)
+        .sum::<i64>();
     let total_blocks: i64 = connection.query_row(
         "SELECT COUNT(*) FROM chapter_blocks WHERE book_id = ?",
         params![book_id],
@@ -337,7 +406,17 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
     let progress = connection
         .query_row(
             r#"
-            SELECT last_read_at, last_chapter_index, last_block_index, progress_percent
+            SELECT
+                last_read_at,
+                last_chapter_index,
+                last_part_index,
+                last_block_index,
+                last_scroll_ratio,
+                last_audio_time_seconds,
+                last_audio_duration_seconds,
+                last_playing_block_index,
+                last_playing_token_index,
+                progress_percent
             FROM reading_progress
             WHERE book_id = ?
             "#,
@@ -346,8 +425,14 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
                 Ok(ReadingProgress {
                     last_read_at: row.get(0)?,
                     last_chapter_index: row.get(1)?,
-                    last_block_index: row.get(2)?,
-                    progress_percent: row.get(3)?,
+                    last_part_index: row.get(2)?,
+                    last_block_index: row.get(3)?,
+                    last_scroll_ratio: row.get(4)?,
+                    last_audio_time_seconds: row.get(5)?,
+                    last_audio_duration_seconds: row.get(6)?,
+                    last_playing_block_index: row.get(7)?,
+                    last_playing_token_index: row.get(8)?,
+                    progress_percent: row.get(9)?,
                 })
             },
         )
@@ -355,9 +440,19 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
         .unwrap_or(ReadingProgress {
             last_read_at: None,
             last_chapter_index: 0,
+            last_part_index: 0,
             last_block_index: 0,
+            last_scroll_ratio: 0.0,
+            last_audio_time_seconds: None,
+            last_audio_duration_seconds: None,
+            last_playing_block_index: None,
+            last_playing_token_index: None,
             progress_percent: 0.0,
         });
+    let mut progress = normalize_reading_progress(progress, &chapters);
+    if let Some(percent) = progress_percent_for_block(connection, book_id, progress.last_block_index)? {
+        progress.progress_percent = percent;
+    }
 
     Ok(Some(ReaderPayload {
         id,
@@ -367,6 +462,7 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
         chapters,
         progress,
         total_blocks,
+        total_progress_units,
     }))
 }
 
@@ -797,33 +893,235 @@ pub fn save_progress(
     connection: &Connection,
     book_id: i64,
     chapter_index: i64,
+    part_index: i64,
     block_index: i64,
+    scroll_ratio: f64,
+    audio_time_seconds: Option<f64>,
+    audio_duration_seconds: Option<f64>,
+    last_playing_block_index: Option<i64>,
+    last_playing_token_index: Option<i64>,
     progress_percent: f64,
 ) -> Result<()> {
     let timestamp = now_iso();
     let progress = progress_percent.clamp(0.0, 100.0);
+    let scroll = scroll_ratio.clamp(0.0, 1.0);
+    let duration = audio_duration_seconds
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let audio_time = audio_time_seconds
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| duration.map_or(value, |duration| value.min(duration)));
+    let normalized = normalize_reading_progress(
+        ReadingProgress {
+            last_read_at: Some(timestamp.clone()),
+            last_chapter_index: chapter_index,
+            last_part_index: part_index,
+            last_block_index: block_index,
+            last_scroll_ratio: scroll,
+            last_audio_time_seconds: audio_time,
+            last_audio_duration_seconds: duration,
+            last_playing_block_index,
+            last_playing_token_index,
+            progress_percent: progress,
+        },
+        &chapter_summaries(connection, book_id)?,
+    );
+    let progress_percent = progress_percent_for_block(
+        connection,
+        book_id,
+        normalized.last_block_index,
+    )?
+    .unwrap_or(normalized.progress_percent);
     connection.execute(
         r#"
         INSERT INTO reading_progress (
-            book_id, last_read_at, last_chapter_index, last_block_index, progress_percent
-        ) VALUES (?, ?, ?, ?, ?)
+            book_id,
+            last_read_at,
+            last_chapter_index,
+            last_part_index,
+            last_block_index,
+            last_scroll_ratio,
+            last_audio_time_seconds,
+            last_audio_duration_seconds,
+            last_playing_block_index,
+            last_playing_token_index,
+            progress_percent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id) DO UPDATE SET
             last_read_at = excluded.last_read_at,
             last_chapter_index = excluded.last_chapter_index,
+            last_part_index = excluded.last_part_index,
             last_block_index = excluded.last_block_index,
+            last_scroll_ratio = excluded.last_scroll_ratio,
+            last_audio_time_seconds = CASE
+                WHEN excluded.last_audio_time_seconds IS NULL
+                 AND excluded.last_chapter_index = reading_progress.last_chapter_index
+                 AND excluded.last_part_index = reading_progress.last_part_index
+                THEN reading_progress.last_audio_time_seconds
+                ELSE excluded.last_audio_time_seconds
+            END,
+            last_audio_duration_seconds = CASE
+                WHEN excluded.last_audio_duration_seconds IS NULL
+                 AND excluded.last_chapter_index = reading_progress.last_chapter_index
+                 AND excluded.last_part_index = reading_progress.last_part_index
+                THEN reading_progress.last_audio_duration_seconds
+                ELSE excluded.last_audio_duration_seconds
+            END,
+            last_playing_block_index = CASE
+                WHEN excluded.last_playing_block_index IS NULL
+                 AND excluded.last_chapter_index = reading_progress.last_chapter_index
+                 AND excluded.last_part_index = reading_progress.last_part_index
+                THEN reading_progress.last_playing_block_index
+                ELSE excluded.last_playing_block_index
+            END,
+            last_playing_token_index = CASE
+                WHEN excluded.last_playing_token_index IS NULL
+                 AND excluded.last_chapter_index = reading_progress.last_chapter_index
+                 AND excluded.last_part_index = reading_progress.last_part_index
+                THEN reading_progress.last_playing_token_index
+                ELSE excluded.last_playing_token_index
+            END,
             progress_percent = excluded.progress_percent
         "#,
-        params![book_id, timestamp, chapter_index, block_index, progress],
+        params![
+            book_id,
+            timestamp,
+            normalized.last_chapter_index,
+            normalized.last_part_index,
+            normalized.last_block_index,
+            normalized.last_scroll_ratio,
+            normalized.last_audio_time_seconds,
+            normalized.last_audio_duration_seconds,
+            normalized.last_playing_block_index,
+            normalized.last_playing_token_index,
+            progress_percent
+        ],
     )?;
     Ok(())
 }
 
+fn normalize_reading_progress(
+    mut progress: ReadingProgress,
+    chapters: &[ChapterSummary],
+) -> ReadingProgress {
+    if let Some(chapter) = chapters.iter().find(|chapter| {
+        progress.last_block_index >= chapter.start_block_index
+            && progress.last_block_index <= chapter.end_block_index
+    }) {
+        progress.last_chapter_index = chapter.chapter_index;
+        progress.last_part_index = chapter
+            .parts
+            .iter()
+            .find(|part| {
+                progress.last_block_index >= part.start_block_index
+                    && progress.last_block_index <= part.end_block_index
+            })
+            .map(|part| part.part_index)
+            .unwrap_or(0);
+        return progress;
+    }
+
+    if let Some(chapter) = chapters
+        .iter()
+        .find(|chapter| chapter.chapter_index == progress.last_chapter_index)
+    {
+        if !chapter
+            .parts
+            .iter()
+            .any(|part| part.part_index == progress.last_part_index)
+        {
+            progress.last_part_index = 0;
+        }
+        return progress;
+    }
+
+    progress.last_chapter_index = 0;
+    progress.last_part_index = 0;
+    progress.last_block_index = 0;
+    progress
+}
+
+fn progress_percent_for_block(
+    connection: &Connection,
+    book_id: i64,
+    block_index: i64,
+) -> Result<Option<f64>> {
+    let chapters = chapter_summaries(connection, book_id)?;
+    let total_units = chapters
+        .iter()
+        .map(|chapter| chapter.progress_units)
+        .sum::<i64>();
+    if total_units <= 0 {
+        return Ok(None);
+    }
+
+    let Some(chapter) = chapters
+        .iter()
+        .find(|chapter| block_index >= chapter.start_block_index && block_index <= chapter.end_block_index)
+    else {
+        return Ok(None);
+    };
+
+    let mut units = chapter.progress_start_unit;
+    if chapter.contributes_to_progress {
+        let chapter_units: i64 = connection.query_row(
+            r#"
+            SELECT COALESCE(SUM(length(text)), 0)
+            FROM chapter_blocks
+            WHERE book_id = ?
+              AND kind = 'paragraph'
+              AND block_index >= ?
+              AND block_index < ?
+            "#,
+            params![book_id, chapter.start_block_index, block_index],
+            |row| row.get(0),
+        )?;
+        units += chapter_units.max(0);
+    }
+
+    let percent = (units as f64 / total_units as f64) * 100.0;
+    Ok(Some((percent.clamp(0.0, 100.0) * 10.0).round() / 10.0))
+}
+
 fn chapter_summaries(connection: &Connection, book_id: i64) -> Result<Vec<ChapterSummary>> {
     let raw_chapters = raw_chapter_summaries(connection, book_id)?;
-    build_reader_chapters(
+    let chapters = build_reader_chapters(
         &raw_chapters,
         &block_markers(connection, book_id, &raw_chapters)?,
-    )
+    )?;
+    with_progress_units(connection, book_id, chapters)
+}
+
+fn with_progress_units(
+    connection: &Connection,
+    book_id: i64,
+    mut chapters: Vec<ChapterSummary>,
+) -> Result<Vec<ChapterSummary>> {
+    let mut progress_start = 0_i64;
+    for chapter in &mut chapters {
+        chapter.contributes_to_progress = is_progress_chapter_title(&chapter.title);
+        if chapter.contributes_to_progress {
+            let units: i64 = connection.query_row(
+                r#"
+                SELECT COALESCE(SUM(length(text)), 0)
+                FROM chapter_blocks
+                WHERE book_id = ?
+                  AND kind = 'paragraph'
+                  AND block_index BETWEEN ? AND ?
+                "#,
+                params![book_id, chapter.start_block_index, chapter.end_block_index],
+                |row| row.get(0),
+            )?;
+            chapter.progress_start_unit = progress_start;
+            chapter.progress_units = units.max(0);
+            progress_start += chapter.progress_units;
+            chapter.progress_end_unit = progress_start;
+        } else {
+            chapter.progress_start_unit = progress_start;
+            chapter.progress_end_unit = progress_start;
+            chapter.progress_units = 0;
+        }
+    }
+    Ok(chapters)
 }
 
 #[derive(Debug)]
@@ -968,6 +1266,10 @@ fn build_reader_chapters(
                 title: chapter_group_title(&first.title, &first.source_href),
                 start_block_index,
                 end_block_index,
+                progress_start_unit: 0,
+                progress_end_unit: 0,
+                progress_units: 0,
+                contributes_to_progress: false,
                 parts: build_chapter_parts(start_block_index, end_block_index, markers),
             })
         })
@@ -1091,6 +1393,13 @@ fn chapter_group_title(title: &str, source_href: &str) -> String {
     } else {
         title.to_string()
     }
+}
+
+fn is_progress_chapter_title(title: &str) -> bool {
+    title
+        .split_whitespace()
+        .next()
+        .is_some_and(|first| first.chars().all(|character| character.is_ascii_digit()))
 }
 
 fn chapter_number_stem(stem: &str) -> Option<String> {
@@ -1380,5 +1689,313 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(10, 14), (15, 20)]
         );
+    }
+
+    #[test]
+    fn migrates_legacy_reading_progress_columns() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE reading_progress (
+                    book_id INTEGER PRIMARY KEY,
+                    last_read_at TEXT NOT NULL,
+                    last_chapter_index INTEGER NOT NULL DEFAULT 0,
+                    last_block_index INTEGER NOT NULL DEFAULT 0,
+                    progress_percent REAL NOT NULL DEFAULT 0
+                );
+                "#,
+            )
+            .expect("legacy schema");
+
+        migrate_reading_progress(&connection).expect("migration");
+
+        let columns = table_columns(&connection, "reading_progress");
+        for column in [
+            "last_part_index",
+            "last_scroll_ratio",
+            "last_audio_time_seconds",
+            "last_audio_duration_seconds",
+            "last_playing_block_index",
+            "last_playing_token_index",
+        ] {
+            assert!(columns.iter().any(|item| item == column), "{column}");
+        }
+    }
+
+    #[test]
+    fn saves_and_reads_rich_progress_with_clamps() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        migrate_reading_progress(&connection).expect("migration");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        connection
+            .execute(
+                r#"
+                INSERT INTO book_chapters (
+                    book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                ) VALUES (1, 2, 'Chapter', 'chapter.xhtml', 40, 50)
+                "#,
+                [],
+            )
+            .expect("chapter");
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 2, 42, 'paragraph', 'Text', NULL, '')
+                "#,
+                [],
+            )
+            .expect("block");
+
+        save_progress(
+            &connection,
+            1,
+            2,
+            3,
+            42,
+            1.25,
+            Some(12.5),
+            Some(10.0),
+            Some(41),
+            Some(7),
+            125.0,
+        )
+        .expect("save");
+
+        let reader = get_reader(&connection, 1).expect("reader").expect("book");
+        assert_eq!(reader.progress.last_chapter_index, 0);
+        assert_eq!(reader.progress.last_part_index, 0);
+        assert_eq!(reader.progress.last_block_index, 42);
+        assert_eq!(reader.progress.last_scroll_ratio, 1.0);
+        assert_eq!(reader.progress.last_audio_time_seconds, Some(10.0));
+        assert_eq!(reader.progress.last_audio_duration_seconds, Some(10.0));
+        assert_eq!(reader.progress.last_playing_block_index, Some(41));
+        assert_eq!(reader.progress.last_playing_token_index, Some(7));
+        assert_eq!(reader.progress.progress_percent, 100.0);
+    }
+
+    #[test]
+    fn normalizes_saved_chapter_from_saved_block_on_read() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        migrate_reading_progress(&connection).expect("migration");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        for (chapter_index, title, source_href, start_block, end_block) in [
+            (1, "1 One", "chapter001.xhtml", 1, 10),
+            (2, "2 Two", "chapter002.xhtml", 40, 50),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO book_chapters (
+                        book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                    "#,
+                    params![chapter_index, title, source_href, start_block, end_block],
+                )
+                .expect("chapter");
+        }
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 2, 42, 'paragraph', 'Text', NULL, '')
+                "#,
+                [],
+            )
+            .expect("block");
+        connection
+            .execute(
+                r#"
+                INSERT INTO reading_progress (
+                    book_id, last_read_at, last_chapter_index, last_part_index, last_block_index,
+                    last_scroll_ratio, progress_percent
+                ) VALUES (1, ?, 1, 0, 42, 0.5, 25)
+                "#,
+                params![timestamp],
+            )
+            .expect("progress");
+
+        let reader = get_reader(&connection, 1).expect("reader").expect("book");
+        assert_eq!(reader.progress.last_chapter_index, 1);
+        assert_eq!(reader.progress.last_part_index, 0);
+        assert_eq!(reader.progress.last_block_index, 42);
+    }
+
+    #[test]
+    fn preserves_audio_progress_when_same_part_save_omits_audio() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        migrate_reading_progress(&connection).expect("migration");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        connection
+            .execute(
+                r#"
+                INSERT INTO book_chapters (
+                    book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                ) VALUES (1, 0, '1 One', 'chapter001.xhtml', 40, 50)
+                "#,
+                [],
+            )
+            .expect("chapter");
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 0, 42, 'paragraph', 'Text', NULL, '')
+                "#,
+                [],
+            )
+            .expect("block");
+
+        save_progress(
+            &connection,
+            1,
+            0,
+            0,
+            42,
+            0.1,
+            Some(12.0),
+            Some(100.0),
+            Some(42),
+            Some(3),
+            10.0,
+        )
+        .expect("audio save");
+        save_progress(
+            &connection,
+            1,
+            0,
+            0,
+            42,
+            0.2,
+            None,
+            None,
+            None,
+            None,
+            10.0,
+        )
+        .expect("scroll save");
+
+        let reader = get_reader(&connection, 1).expect("reader").expect("book");
+        assert_eq!(reader.progress.last_scroll_ratio, 0.2);
+        assert_eq!(reader.progress.last_audio_time_seconds, Some(12.0));
+        assert_eq!(reader.progress.last_audio_duration_seconds, Some(100.0));
+        assert_eq!(reader.progress.last_playing_block_index, Some(42));
+        assert_eq!(reader.progress.last_playing_token_index, Some(3));
+    }
+
+    #[test]
+    fn progress_percent_counts_only_numbered_chapter_characters() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        migrate_reading_progress(&connection).expect("migration");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+
+        for (chapter_index, title, source_href, block_index) in [
+            (0, "Copyright", "copyright.xhtml", 0),
+            (1, "1 One", "chapter001.xhtml", 1),
+            (2, "2 Two", "chapter002.xhtml", 2),
+            (3, "BT Bonus track!", "bonus.xhtml", 3),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO book_chapters (
+                        book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                    "#,
+                    params![chapter_index, title, source_href, block_index, block_index],
+                )
+                .expect("chapter");
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                    VALUES (1, ?, ?, 'paragraph', ?, NULL, '')
+                    "#,
+                    params![chapter_index, block_index, "x".repeat(100)],
+                )
+                .expect("block");
+        }
+
+        save_progress(
+            &connection,
+            1,
+            2,
+            0,
+            2,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            99.0,
+        )
+        .expect("save");
+
+        let reader = get_reader(&connection, 1).expect("reader").expect("book");
+        assert_eq!(reader.total_progress_units, 200);
+        assert_eq!(reader.progress.progress_percent, 50.0);
+
+        let books = list_books(&connection).expect("books");
+        assert_eq!(books[0].progress_percent, 50.0);
+    }
+
+    fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("table info");
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("column names")
     }
 }
