@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cefr::ReaderToken;
 
@@ -78,6 +78,31 @@ pub struct PartAudioPayload {
     pub paragraph_count: i64,
     pub duration_seconds: f64,
     pub generated_at: String,
+    pub alignment_available: bool,
+    pub alignment_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AlignmentToken {
+    pub block_index: i64,
+    pub token_index: usize,
+    pub text: String,
+    pub start_time: f64,
+    pub end_time: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PartAlignmentPayload {
+    pub book_id: i64,
+    pub chapter_index: i64,
+    pub part_index: i64,
+    pub voice: String,
+    pub audio_path: String,
+    pub duration_seconds: f64,
+    pub mapped_token_count: usize,
+    pub source_token_count: usize,
+    pub transcript_word_count: usize,
+    pub tokens: Vec<AlignmentToken>,
 }
 
 #[derive(Debug, Serialize)]

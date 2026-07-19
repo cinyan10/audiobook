@@ -75,6 +75,29 @@ export type PartAudioPayload = {
   paragraph_count: number;
   duration_seconds: number;
   generated_at: string;
+  alignment_available: boolean;
+  alignment_error: string | null;
+};
+
+export type TimedToken = {
+  block_index: number;
+  token_index: number;
+  text: string;
+  start_time: number;
+  end_time: number;
+};
+
+export type PartAlignmentPayload = {
+  book_id: number;
+  chapter_index: number;
+  part_index: number;
+  voice: string;
+  audio_path: string;
+  duration_seconds: number;
+  mapped_token_count: number;
+  source_token_count: number;
+  transcript_word_count: number;
+  tokens: TimedToken[];
 };
 
 export type ImportSummary = {

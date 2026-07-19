@@ -17,8 +17,18 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { generatePartAudio, getChapter, getPartAudio, getReader, importBooks, listBooks, saveProgress } from "@/lib/api";
-import type { BookSummary, ChapterPayload, PartAudioPayload, ReaderPayload } from "@/types";
+import {
+  generatePartAudio,
+  getChapter,
+  getPartAlignment,
+  getPartAudio,
+  getReader,
+  importBooks,
+  listBooks,
+  saveProgress,
+  syncPartAlignment,
+} from "@/lib/api";
+import type { BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, TimedToken } from "@/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -289,15 +299,24 @@ function ReaderView({
   const [partAudio, setPartAudio] = useState<PartAudioPayload | null>(null);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const [generatingAudio, setGeneratingAudio] = useState(false);
+  const [partAlignment, setPartAlignment] = useState<PartAlignmentPayload | null>(null);
+  const [loadingAlignment, setLoadingAlignment] = useState(false);
+  const [syncingAlignment, setSyncingAlignment] = useState(false);
+  const [activeTokenKey, setActiveTokenKey] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
   const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const wordPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const pendingPartBlockRef = useRef<number | null>(null);
+  const tokenRefs = useRef<Record<string, HTMLElement | null>>({});
+  const wordPreviewEndTimeRef = useRef<number | null>(null);
+  const lastAutoScrollTokenRef = useRef<string | null>(null);
+  const lastSelectionSeekKeyRef = useRef("");
 
   useEffect(() => {
     let cancelled = false;
@@ -443,6 +462,20 @@ function ReaderView({
     () => visibleBlocks.filter((block) => block.kind === "paragraph").length,
     [visibleBlocks],
   );
+  const timedTokensByKey = useMemo(() => {
+    const tokens = new Map<string, TimedToken>();
+    for (const token of partAlignment?.tokens ?? []) {
+      tokens.set(timedTokenKey(token.block_index, token.token_index), token);
+    }
+    return tokens;
+  }, [partAlignment]);
+
+  useEffect(() => {
+    tokenRefs.current = {};
+    lastAutoScrollTokenRef.current = null;
+    lastSelectionSeekKeyRef.current = "";
+    setActiveTokenKey(null);
+  }, [chapterIndex, partIndex]);
 
   useEffect(() => {
     if (!activePart) {
@@ -507,6 +540,8 @@ function ReaderView({
 
   useEffect(() => {
     const audio = audioRef.current;
+    wordPreviewAudioRef.current?.pause();
+    wordPreviewEndTimeRef.current = null;
     if (!audio) {
       return;
     }
@@ -523,6 +558,33 @@ function ReaderView({
     audio.load();
     setAudioState({ currentTime: 0, duration: 0, playing: false });
   }, [partAudio]);
+
+  useEffect(() => {
+    setPartAlignment(null);
+    setActiveTokenKey(null);
+    lastAutoScrollTokenRef.current = null;
+    if (!partAudio?.alignment_available || !activePart) {
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingAlignment(true);
+    void getPartAlignment(bookId, chapterIndex, activePart.part_index)
+      .then((payload) => {
+        if (!cancelled) {
+          setPartAlignment(payload);
+        }
+      })
+      .catch((error) => toast.error(errorMessage(error, "Failed to load word sync.")))
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingAlignment(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePart, bookId, chapterIndex, partAudio]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -547,6 +609,28 @@ function ReaderView({
       audio.removeEventListener("play", syncAudioState);
       audio.removeEventListener("pause", syncAudioState);
       audio.removeEventListener("ended", syncAudioState);
+    };
+  }, []);
+
+  useEffect(() => {
+    const audio = wordPreviewAudioRef.current;
+    if (!audio) {
+      return;
+    }
+    const stopAtEnd = () => {
+      if (wordPreviewEndTimeRef.current !== null && audio.currentTime >= wordPreviewEndTimeRef.current) {
+        wordPreviewEndTimeRef.current = null;
+        audio.pause();
+      }
+    };
+    const clearEnd = () => {
+      wordPreviewEndTimeRef.current = null;
+    };
+    audio.addEventListener("timeupdate", stopAtEnd);
+    audio.addEventListener("ended", clearEnd);
+    return () => {
+      audio.removeEventListener("timeupdate", stopAtEnd);
+      audio.removeEventListener("ended", clearEnd);
     };
   }, []);
 
@@ -579,7 +663,13 @@ function ReaderView({
       try {
         const payload = await generatePartAudio(bookId, chapterIndex, activePart.part_index, regenerate);
         setPartAudio(payload);
-        toast.success(regenerate ? "Audio regenerated." : "Audio generated.");
+        if (payload.alignment_error) {
+          toast.warning(regenerate ? "Audio regenerated, word sync failed." : "Audio generated, word sync failed.", {
+            description: payload.alignment_error,
+          });
+        } else {
+          toast.success(payload.alignment_available ? "Audio and word sync ready." : regenerate ? "Audio regenerated." : "Audio generated.");
+        }
       } catch (error) {
         toast.error(errorMessage(error, "Audio generation failed."));
       } finally {
@@ -590,17 +680,59 @@ function ReaderView({
     [activePart, bookId, chapterIndex, partParagraphCount],
   );
 
+  const stopWordPreview = useCallback(() => {
+    wordPreviewEndTimeRef.current = null;
+    wordPreviewAudioRef.current?.pause();
+  }, []);
+
+  const syncCurrentPartAlignment = useCallback(
+    async (regenerate: boolean) => {
+      if (!activePart || !partAudio) {
+        return;
+      }
+      setSyncingAlignment(true);
+      try {
+        const payload = await syncPartAlignment(bookId, chapterIndex, activePart.part_index, regenerate);
+        setPartAlignment(payload);
+        setPartAudio((current) =>
+          current &&
+          current.book_id === bookId &&
+          current.chapter_index === chapterIndex &&
+          current.part_index === activePart.part_index
+            ? { ...current, alignment_available: true, alignment_error: null }
+            : current,
+        );
+        toast.success(regenerate ? "Word sync refreshed." : "Word sync ready.");
+      } catch (error) {
+        const message = errorMessage(error, "Word sync failed.");
+        setPartAudio((current) =>
+          current &&
+          current.book_id === bookId &&
+          current.chapter_index === chapterIndex &&
+          current.part_index === activePart.part_index
+            ? { ...current, alignment_available: false, alignment_error: message }
+            : current,
+        );
+        toast.error(message);
+      } finally {
+        setSyncingAlignment(false);
+      }
+    },
+    [activePart, bookId, chapterIndex, partAudio],
+  );
+
   const toggleAudioPlay = useCallback(() => {
     const audio = audioRef.current;
     if (!audio || !partAudio) {
       return;
     }
     if (audio.paused) {
+      stopWordPreview();
       void audio.play().catch((error) => toast.error(errorMessage(error, "Failed to play audio.")));
     } else {
       audio.pause();
     }
-  }, [partAudio]);
+  }, [partAudio, stopWordPreview]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -613,6 +745,35 @@ function ReaderView({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [toggleAudioPlay]);
+
+  useEffect(() => {
+    if (!partAlignment?.tokens.length) {
+      setActiveTokenKey(null);
+      return;
+    }
+    const activeToken =
+      partAlignment.tokens.find((token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time) ??
+      [...partAlignment.tokens].reverse().find((token) => token.start_time <= audioState.currentTime);
+    const key = activeToken ? timedTokenKey(activeToken.block_index, activeToken.token_index) : null;
+    setActiveTokenKey((current) => (current === key ? current : key));
+
+    if (!audioState.playing || !key || lastAutoScrollTokenRef.current === key) {
+      return;
+    }
+    const element = tokenRefs.current[key];
+    if (!element) {
+      return;
+    }
+    const bounds = element.getBoundingClientRect();
+    const player = document.querySelector<HTMLElement>(".reader-audio");
+    const headerInset = 88;
+    const bottomInset = (player?.offsetHeight ?? 0) + 48;
+    const visibleBottom = window.innerHeight - bottomInset;
+    if (bounds.bottom > visibleBottom || bounds.top < headerInset) {
+      lastAutoScrollTokenRef.current = key;
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }, [audioState.currentTime, audioState.playing, partAlignment]);
 
   const toggleMarkedToken = useCallback(
     (tokenKey: string) => {
@@ -658,9 +819,82 @@ function ReaderView({
     if (!audio) {
       return;
     }
+    stopWordPreview();
     audio.currentTime = Math.max(0, Math.min(time, Number.isFinite(audio.duration) ? audio.duration : time));
     setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
-  }, []);
+  }, [stopWordPreview]);
+
+  const seekToTimedToken = useCallback(
+    (blockIndex: number, tokenIndex: number) => {
+      const audio = audioRef.current;
+      if (!audio || !partAudio) {
+        return;
+      }
+      const key = timedTokenKey(blockIndex, tokenIndex);
+      const token = timedTokensByKey.get(key);
+      if (!token) {
+        return;
+      }
+      stopWordPreview();
+      audio.currentTime = Math.max(0, token.start_time);
+      setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
+      setActiveTokenKey(key);
+
+      if (audio.paused) {
+        const preview = wordPreviewAudioRef.current;
+        if (!preview) {
+          return;
+        }
+        preview.pause();
+        preview.src = audio.src || convertFileSrc(partAudio.audio_path);
+        wordPreviewEndTimeRef.current = Math.max(token.end_time, token.start_time + 0.15);
+        preview.currentTime = token.start_time;
+        void preview.play().catch((error) => toast.error(errorMessage(error, "Failed to play word preview.")));
+      }
+    },
+    [partAudio, stopWordPreview, timedTokensByKey],
+  );
+
+  useEffect(() => {
+    if (!partAlignment?.tokens.length) {
+      return;
+    }
+
+    const seekSelectedWord = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
+        lastSelectionSeekKeyRef.current = "";
+        return;
+      }
+      const text = selection.toString().trim();
+      if (!text || /\s/.test(text)) {
+        lastSelectionSeekKeyRef.current = "";
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      for (const token of partAlignment.tokens) {
+        const key = timedTokenKey(token.block_index, token.token_index);
+        const element = tokenRefs.current[key];
+        if (!element || !range.intersectsNode(element) || element.textContent?.trim() !== text) {
+          continue;
+        }
+        const seekKey = `${key}:${text}`;
+        if (lastSelectionSeekKeyRef.current === seekKey) {
+          return;
+        }
+        lastSelectionSeekKeyRef.current = seekKey;
+        seekToTimedToken(token.block_index, token.token_index);
+        return;
+      }
+    };
+
+    document.addEventListener("mouseup", seekSelectedWord);
+    document.addEventListener("keyup", seekSelectedWord);
+    return () => {
+      document.removeEventListener("mouseup", seekSelectedWord);
+      document.removeEventListener("keyup", seekSelectedWord);
+    };
+  }, [partAlignment, seekToTimedToken]);
 
   const audioGenerationPercent = Math.round(audioProgress?.percent ?? 0);
   const audioGenerationStatus =
@@ -744,7 +978,7 @@ function ReaderView({
                     {partAudio ? (
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
-                          <Button size="sm" disabled={generatingAudio || loadingAudio} aria-label={generatingAudio ? audioGenerationStatus : undefined}>
+                          <Button size="sm" disabled={generatingAudio || loadingAudio || syncingAlignment} aria-label={generatingAudio ? audioGenerationStatus : undefined}>
                             {generatingAudio ? <AudioGenerationRing percent={audioProgress?.percent ?? 0} /> : <AudioLinesIcon data-icon="inline-start" />}
                             {generatingAudio ? `Generating ${audioGenerationPercent}%` : "Regenerate audio"}
                           </Button>
@@ -775,6 +1009,20 @@ function ReaderView({
                         {generatingAudio ? `Generating ${audioGenerationPercent}%` : "Generate audio"}
                       </Button>
                     )}
+                    {partAudio ? (
+                      <Button
+                        size="sm"
+                        variant={partAlignment ? "secondary" : "default"}
+                        disabled={syncingAlignment || generatingAudio || loadingAlignment}
+                        onClick={() => void syncCurrentPartAlignment(Boolean(partAlignment))}
+                      >
+                        <AudioLinesIcon data-icon="inline-start" />
+                        {syncingAlignment ? "Syncing words" : partAlignment ? "Resync words" : "Sync words"}
+                      </Button>
+                    ) : null}
+                    {loadingAlignment ? <span>Loading word sync</span> : null}
+                    {!loadingAlignment && partAlignment ? <span>{partAlignment.mapped_token_count.toLocaleString()} words synced</span> : null}
+                    {!loadingAlignment && !partAlignment && partAudio?.alignment_error ? <span>Word sync unavailable</span> : null}
                   </div>
                 </div>
                 <Separator />
@@ -790,8 +1038,14 @@ function ReaderView({
                         <ReaderTokens
                           block={block}
                           chapterIndex={chapterIndex}
+                          activeTokenKey={activeTokenKey}
                           markedTokens={markedTokens}
+                          timedTokensByKey={timedTokensByKey}
+                          onSeekToken={seekToTimedToken}
                           onToggleMarkedToken={toggleMarkedToken}
+                          onTokenRef={(tokenKey, node) => {
+                            tokenRefs.current[tokenKey] = node;
+                          }}
                         />
                       </p>
                     ) : (
@@ -809,6 +1063,7 @@ function ReaderView({
           </article>
         </div>
         <audio ref={audioRef} preload="metadata" className="hidden" />
+        <audio ref={wordPreviewAudioRef} preload="metadata" className="hidden" />
         {dialogImage ? (
           <ImageDialog
             image={dialogImage}
@@ -1026,13 +1281,21 @@ function formatClock(seconds: number) {
 function ReaderTokens({
   block,
   chapterIndex,
+  activeTokenKey,
   markedTokens,
+  timedTokensByKey,
+  onSeekToken,
   onToggleMarkedToken,
+  onTokenRef,
 }: {
   block: ChapterPayload["blocks"][number];
   chapterIndex: number;
+  activeTokenKey: string | null;
   markedTokens: Set<string>;
+  timedTokensByKey: Map<string, TimedToken>;
+  onSeekToken: (blockIndex: number, tokenIndex: number) => void;
   onToggleMarkedToken: (tokenKey: string) => void;
+  onTokenRef: (tokenKey: string, node: HTMLElement | null) => void;
 }) {
   if (!block.tokens.length) {
     return <>{block.text}</>;
@@ -1041,16 +1304,26 @@ function ReaderTokens({
     <>
       {block.tokens.map((token, index) => {
         const tokenKey = markedTokenKey(chapterIndex, block.block_index, index);
+        const syncKey = timedTokenKey(block.block_index, index);
+        const hasTiming = timedTokensByKey.has(syncKey);
         return (
           <span
             key={`${block.block_index}-${index}`}
+            ref={(node) => onTokenRef(syncKey, node)}
             className={cn(
               "reader-token",
               token.cefr_level && `level-${token.cefr_level.toLowerCase()}`,
               markedTokens.has(tokenKey) && "marked",
+              hasTiming && "synced",
+              activeTokenKey === syncKey && "active",
             )}
             data-cefr-level={token.cefr_level || undefined}
             data-root-text={token.root_text || undefined}
+            onClick={() => {
+              if (hasTiming) {
+                onSeekToken(block.block_index, index);
+              }
+            }}
             onContextMenu={(event) => {
               event.preventDefault();
               onToggleMarkedToken(tokenKey);
@@ -1066,6 +1339,10 @@ function ReaderTokens({
 
 function markedTokenKey(chapterIndex: number, blockIndex: number, tokenIndex: number) {
   return `${chapterIndex}:${blockIndex}:${tokenIndex}`;
+}
+
+function timedTokenKey(blockIndex: number, tokenIndex: number) {
+  return `${blockIndex}:${tokenIndex}`;
 }
 
 function markedTokensStorageKey(bookId: number) {

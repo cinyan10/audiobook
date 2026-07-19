@@ -9,14 +9,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, State, Window};
 
+use crate::cefr;
 use crate::db::{self, GeneratedAudioParagraph, GeneratedPartAudio, ImportOutcome};
 use crate::models::{
-    BookSummary, ChapterPayload, ImportFailure, ImportSummary, PartAudioPayload, ReaderPayload,
+    BookSummary, ChapterPayload, ImportFailure, ImportSummary, PartAlignmentPayload,
+    PartAudioPayload, ReaderPayload,
 };
 use crate::AppState;
 
 const DEFAULT_AUDIO_VOICE: &str = "bf_emma";
 const DEFAULT_AUDIO_SPEED: f64 = 0.95;
+const PARAGRAPH_SILENCE_SECONDS: f64 = 0.22;
 
 #[tauri::command]
 pub fn list_books(state: State<'_, AppState>) -> Result<Vec<BookSummary>, String> {
@@ -106,6 +109,100 @@ pub fn get_part_audio(
     )
     .map_err(|error| error.to_string())?;
     Ok(audio.filter(|payload| Path::new(&payload.audio_path).exists()))
+}
+
+#[tauri::command]
+pub fn get_part_alignment(
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    state: State<'_, AppState>,
+) -> Result<Option<PartAlignmentPayload>, String> {
+    let connection = state
+        .db
+        .lock()
+        .map_err(|_| "Database lock failed.".to_string())?;
+    db::get_part_alignment(
+        &connection,
+        book_id,
+        chapter_index,
+        part_index,
+        DEFAULT_AUDIO_VOICE,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_part_alignment(
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    regenerate: bool,
+    state: State<'_, AppState>,
+) -> Result<PartAlignmentPayload, String> {
+    if !regenerate {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| "Database lock failed.".to_string())?;
+        if let Some(alignment) = db::get_part_alignment(
+            &connection,
+            book_id,
+            chapter_index,
+            part_index,
+            DEFAULT_AUDIO_VOICE,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Ok(alignment);
+        }
+    }
+
+    let (audio, paragraphs, generated_paragraphs) = {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| "Database lock failed.".to_string())?;
+        let audio = db::get_part_audio(
+            &connection,
+            book_id,
+            chapter_index,
+            part_index,
+            DEFAULT_AUDIO_VOICE,
+        )
+        .map_err(|error| error.to_string())?
+        .filter(|payload| Path::new(&payload.audio_path).exists())
+        .ok_or_else(|| "Generate audio before syncing words.".to_string())?;
+        let paragraphs = db::part_audio_paragraphs(&connection, book_id, chapter_index, part_index)
+            .map_err(|error| error.to_string())?;
+        let generated_paragraphs = db::generated_audio_paragraphs(
+            &connection,
+            book_id,
+            chapter_index,
+            part_index,
+            DEFAULT_AUDIO_VOICE,
+        )
+        .map_err(|error| error.to_string())?;
+        (audio, paragraphs, generated_paragraphs)
+    };
+
+    let output_dir = Path::new(&audio.audio_path)
+        .parent()
+        .ok_or_else(|| "Audio path has no parent directory.".to_string())?
+        .to_path_buf();
+    run_and_store_part_alignment(
+        &state,
+        book_id,
+        chapter_index,
+        part_index,
+        &audio.voice,
+        &audio.audio_path,
+        audio.duration_seconds,
+        &paragraphs,
+        &generated_paragraphs,
+        &output_dir,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -229,6 +326,7 @@ pub async fn generate_part_audio(
     )
     .map_err(|error| format!("Invalid generator response: {error}"))?;
 
+    let response_paragraphs = response.paragraphs.clone();
     let generated = GeneratedPartAudio {
         book_id,
         chapter_index,
@@ -250,11 +348,73 @@ pub async fn generate_part_audio(
             .collect(),
     };
 
-    let mut connection = state
-        .db
-        .lock()
-        .map_err(|_| "Database lock failed.".to_string())?;
-    let saved = db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())?;
+    let saved = {
+        let mut connection = state
+            .db
+            .lock()
+            .map_err(|_| "Database lock failed.".to_string())?;
+        let saved = db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())?;
+        db::delete_part_alignment(
+            &connection,
+            book_id,
+            chapter_index,
+            part_index,
+            DEFAULT_AUDIO_VOICE,
+        )
+        .map_err(|error| error.to_string())?;
+        saved
+    };
+
+    let alignment_paragraphs = response_paragraphs
+        .iter()
+        .map(|paragraph| GeneratedAudioParagraph {
+            block_index: paragraph.block_index,
+            text_hash: String::new(),
+            audio_path: paragraph.path.clone(),
+            duration_seconds: paragraph.duration_seconds,
+        })
+        .collect::<Vec<_>>();
+    let saved = match run_and_store_part_alignment(
+        &state,
+        book_id,
+        chapter_index,
+        part_index,
+        &saved.voice,
+        &saved.audio_path,
+        saved.duration_seconds,
+        &paragraphs,
+        &alignment_paragraphs,
+        &output_dir,
+    )
+    .await
+    {
+        Ok(_) => PartAudioPayload {
+            alignment_available: true,
+            alignment_error: None,
+            ..saved
+        },
+        Err(error) => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|_| "Database lock failed.".to_string())?;
+            db::save_part_alignment_error(
+                &connection,
+                book_id,
+                chapter_index,
+                part_index,
+                &saved.voice,
+                &saved.audio_path,
+                &error,
+            )
+            .map_err(|error| error.to_string())?;
+            PartAudioPayload {
+                alignment_available: false,
+                alignment_error: Some(error),
+                ..saved
+            }
+        }
+    };
     emit_audio_generation_progress(
         &window,
         book_id,
@@ -305,7 +465,7 @@ struct GeneratorRequestParagraph {
     output_path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GeneratorResponse {
     voice: String,
     part_path: String,
@@ -313,7 +473,7 @@ struct GeneratorResponse {
     paragraphs: Vec<GeneratorResponseParagraph>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GeneratorResponseParagraph {
     block_index: i64,
     path: String,
@@ -326,6 +486,35 @@ struct GeneratorProgressLine {
     stage: String,
     completed: usize,
     total: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AlignmentRequest {
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: String,
+    audio_path: String,
+    duration_seconds: f64,
+    paragraphs: Vec<AlignmentRequestParagraph>,
+}
+
+#[derive(Debug, Serialize)]
+struct AlignmentRequestParagraph {
+    block_index: i64,
+    text: String,
+    audio_path: String,
+    offset_seconds: f64,
+    duration_seconds: f64,
+    tokens: Vec<AlignmentRequestToken>,
+}
+
+#[derive(Debug, Serialize)]
+struct AlignmentRequestToken {
+    token_index: usize,
+    block_index: i64,
+    text: String,
+    normalized_text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -363,6 +552,154 @@ fn emit_audio_generation_progress(
     );
 }
 
+async fn run_and_store_part_alignment(
+    state: &State<'_, AppState>,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+    audio_path: &str,
+    duration_seconds: f64,
+    paragraphs: &[db::AudioParagraphSource],
+    generated_paragraphs: &[GeneratedAudioParagraph],
+    output_dir: &Path,
+) -> Result<PartAlignmentPayload, String> {
+    let request_path = output_dir.join("alignment-request.json");
+    let response_path = output_dir.join("alignment.json");
+    let request = build_alignment_request(
+        book_id,
+        chapter_index,
+        part_index,
+        voice,
+        audio_path,
+        duration_seconds,
+        paragraphs,
+        generated_paragraphs,
+    )?;
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let alignment_request_path = request_path.clone();
+    let alignment_response_path = response_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_alignment_worker(&alignment_request_path, &alignment_response_path)
+    })
+    .await
+    .map_err(|error| format!("Alignment task failed: {error}"))??;
+
+    let alignment: PartAlignmentPayload = serde_json::from_slice(
+        &fs::read(&response_path)
+            .map_err(|error| format!("Unable to read alignment response: {error}"))?,
+    )
+    .map_err(|error| format!("Invalid alignment response: {error}"))?;
+
+    let connection = state
+        .db
+        .lock()
+        .map_err(|_| "Database lock failed.".to_string())?;
+    db::save_part_alignment(&connection, &alignment, &response_path)
+        .map_err(|error| error.to_string())?;
+    Ok(alignment)
+}
+
+fn build_alignment_request(
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+    audio_path: &str,
+    duration_seconds: f64,
+    paragraphs: &[db::AudioParagraphSource],
+    generated_paragraphs: &[GeneratedAudioParagraph],
+) -> Result<AlignmentRequest, String> {
+    let generated_by_block = generated_paragraphs
+        .iter()
+        .map(|paragraph| (paragraph.block_index, paragraph))
+        .collect::<HashMap<_, _>>();
+    let mut offset_seconds = 0.0;
+    let mut request_paragraphs = Vec::new();
+
+    for paragraph in paragraphs {
+        let generated = generated_by_block
+            .get(&paragraph.block_index)
+            .ok_or_else(|| format!("Generated audio missing for block {}.", paragraph.block_index))?;
+        let tokens = cefr::tokenize_text(&paragraph.text)
+            .into_iter()
+            .enumerate()
+            .map(|(token_index, token)| AlignmentRequestToken {
+                token_index,
+                block_index: paragraph.block_index,
+                text: token.text,
+                normalized_text: token.normalized_text,
+            })
+            .collect();
+        request_paragraphs.push(AlignmentRequestParagraph {
+            block_index: paragraph.block_index,
+            text: paragraph.text.clone(),
+            audio_path: generated.audio_path.clone(),
+            offset_seconds: round_seconds(offset_seconds),
+            duration_seconds: generated.duration_seconds,
+            tokens,
+        });
+        offset_seconds += generated.duration_seconds + PARAGRAPH_SILENCE_SECONDS;
+    }
+
+    Ok(AlignmentRequest {
+        book_id,
+        chapter_index,
+        part_index,
+        voice: voice.to_string(),
+        audio_path: audio_path.to_string(),
+        duration_seconds,
+        paragraphs: request_paragraphs,
+    })
+}
+
+fn run_alignment_worker(request_path: &Path, response_path: &Path) -> Result<(), String> {
+    let repo_root = repo_root();
+    let python_path = worker_python_path(&repo_root);
+    let script_path = std::env::var_os("READALONG_ALIGN_SCRIPT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("scripts").join("align_part_audio.py"));
+    let model = std::env::var("READALONG_ALIGN_MODEL").unwrap_or_else(|_| "small.en".to_string());
+
+    if !python_path.exists() {
+        return Err(format!(
+            "Python environment not found at {}. Create .venv or set READALONG_PYTHON.",
+            python_path.display()
+        ));
+    }
+    if !script_path.exists() {
+        return Err(format!(
+            "Alignment script not found at {}. Set READALONG_ALIGN_SCRIPT if it lives elsewhere.",
+            script_path.display()
+        ));
+    }
+
+    let output = Command::new(&python_path)
+        .arg(&script_path)
+        .arg("--request")
+        .arg(request_path)
+        .arg("--response")
+        .arg(response_path)
+        .arg("--model")
+        .arg(model)
+        .output()
+        .map_err(|error| format!("Unable to start alignment worker: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if stderr.is_empty() { stdout } else { stderr };
+    Err(format!("Alignment failed: {details}"))
+}
+
 fn run_kokoro_generator<F>(
     request_path: &Path,
     response_path: &Path,
@@ -372,16 +709,14 @@ where
     F: FnMut(GeneratorProgressLine),
 {
     let repo_root = repo_root();
-    let python_path = std::env::var_os("READALONG_KOKORO_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_python_path(&repo_root));
+    let python_path = worker_python_path(&repo_root);
     let script_path = std::env::var_os("READALONG_KOKORO_SCRIPT")
         .map(PathBuf::from)
         .unwrap_or_else(|| repo_root.join("scripts").join("kokoro_generate_part.py"));
 
     if !python_path.exists() {
         return Err(format!(
-            "Kokoro Python environment not found at {}. Create .venv-kokoro or set READALONG_KOKORO_PYTHON.",
+            "Python environment not found at {}. Create .venv or set READALONG_PYTHON.",
             python_path.display()
         ));
     }
@@ -452,14 +787,21 @@ fn repo_root() -> PathBuf {
     manifest_dir.parent().unwrap_or(&manifest_dir).to_path_buf()
 }
 
+fn worker_python_path(repo_root: &Path) -> PathBuf {
+    std::env::var_os("READALONG_PYTHON")
+        .or_else(|| std::env::var_os("READALONG_KOKORO_PYTHON"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_python_path(repo_root))
+}
+
 fn default_python_path(repo_root: &Path) -> PathBuf {
     if cfg!(windows) {
         repo_root
-            .join(".venv-kokoro")
+            .join(".venv")
             .join("Scripts")
             .join("python.exe")
     } else {
-        repo_root.join(".venv-kokoro").join("bin").join("python")
+        repo_root.join(".venv").join("bin").join("python")
     }
 }
 
@@ -469,4 +811,8 @@ fn hash_text(text: &str) -> String {
 
 fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn round_seconds(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
 }

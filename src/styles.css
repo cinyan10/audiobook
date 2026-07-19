@@ -596,11 +596,27 @@ svg {
   background: transparent;
 }
 
+.reader-token.synced {
+  cursor: pointer;
+  border-radius: 0.18em;
+}
+
+.reader-token.synced:hover {
+  background: oklch(var(--primary) / 0.1);
+}
+
+.reader-token.active,
+.reader-token.active[class*="level-"] {
+  background: oklch(var(--primary) / 0.18);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  outline: 1px solid oklch(var(--primary) / 0.26);
+}
+
 .reader-token.marked {
   background: #fff200;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  color: #2c40d0;
 }
 
 .reader-token.level-a1 {
@@ -627,9 +643,10 @@ svg {
   color: #475569;
 }
 
-.reader-token.marked,
-.reader-token.marked[class*="level-"] {
-  color: #2c40d0;
+.reader-token.active.marked,
+.reader-token.active.marked[class*="level-"] {
+  background: oklch(var(--primary) / 0.22);
+  outline: 1px solid oklch(var(--primary) / 0.34);
 }
 
 @media (max-width: 900px) {

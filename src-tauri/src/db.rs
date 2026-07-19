@@ -11,7 +11,7 @@ use crate::epub;
 use crate::epub::ExtractedBlockKind;
 use crate::models::{
     BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload, ChapterSummary,
-    PartAudioPayload, ReaderPayload, ReadingProgress,
+    PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress,
 };
 
 const SCHEMA: &str = r#"
@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS audio_parts (
     audio_path TEXT NOT NULL,
     paragraph_count INTEGER NOT NULL DEFAULT 0,
     duration_seconds REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(book_id, chapter_index, part_index, voice)
+);
+
+CREATE TABLE IF NOT EXISTS audio_alignments (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    part_index INTEGER NOT NULL,
+    voice TEXT NOT NULL,
+    audio_path TEXT NOT NULL,
+    alignment_path TEXT NOT NULL DEFAULT '',
+    token_count INTEGER NOT NULL DEFAULT 0,
+    duration_seconds REAL NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(book_id, chapter_index, part_index, voice)
@@ -437,15 +452,32 @@ pub fn get_part_audio(
     connection
         .query_row(
             r#"
-            SELECT book_id, chapter_index, part_index, voice, audio_path, paragraph_count, duration_seconds, updated_at
-            FROM audio_parts
-            WHERE book_id = ?
-              AND chapter_index = ?
-              AND part_index = ?
-              AND voice = ?
+            SELECT
+                p.book_id,
+                p.chapter_index,
+                p.part_index,
+                p.voice,
+                p.audio_path,
+                p.paragraph_count,
+                p.duration_seconds,
+                p.updated_at,
+                COALESCE(a.alignment_path, ''),
+                COALESCE(a.last_error, '')
+            FROM audio_parts p
+            LEFT JOIN audio_alignments a
+              ON a.book_id = p.book_id
+             AND a.chapter_index = p.chapter_index
+             AND a.part_index = p.part_index
+             AND a.voice = p.voice
+            WHERE p.book_id = ?
+              AND p.chapter_index = ?
+              AND p.part_index = ?
+              AND p.voice = ?
             "#,
             params![book_id, chapter_index, part_index, voice],
             |row| {
+                let alignment_path: String = row.get(8)?;
+                let alignment_error: String = row.get(9)?;
                 Ok(PartAudioPayload {
                     book_id: row.get(0)?,
                     chapter_index: row.get(1)?,
@@ -455,6 +487,12 @@ pub fn get_part_audio(
                     paragraph_count: row.get(5)?,
                     duration_seconds: row.get(6)?,
                     generated_at: row.get(7)?,
+                    alignment_available: !alignment_path.is_empty() && Path::new(&alignment_path).exists(),
+                    alignment_error: if alignment_error.is_empty() {
+                        None
+                    } else {
+                        Some(alignment_error)
+                    },
                 })
             },
         )
@@ -519,6 +557,36 @@ pub fn part_audio_paragraphs(
             text: block.text,
         })
         .collect())
+}
+
+pub fn generated_audio_paragraphs(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+) -> Result<Vec<GeneratedAudioParagraph>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT block_index, text_hash, audio_path, duration_seconds
+        FROM audio_paragraphs
+        WHERE book_id = ?
+          AND chapter_index = ?
+          AND part_index = ?
+          AND voice = ?
+        ORDER BY block_index
+        "#,
+    )?;
+    let rows = statement.query_map(params![book_id, chapter_index, part_index, voice], |row| {
+        Ok(GeneratedAudioParagraph {
+            block_index: row.get(0)?,
+            text_hash: row.get(1)?,
+            audio_path: row.get(2)?,
+            duration_seconds: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn save_part_audio(
@@ -592,7 +660,137 @@ pub fn save_part_audio(
         paragraph_count: audio.paragraphs.len() as i64,
         duration_seconds: audio.duration_seconds,
         generated_at: timestamp,
+        alignment_available: false,
+        alignment_error: None,
     })
+}
+
+pub fn get_part_alignment(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+) -> Result<Option<PartAlignmentPayload>> {
+    let path: Option<String> = connection
+        .query_row(
+            r#"
+            SELECT alignment_path
+            FROM audio_alignments
+            WHERE book_id = ?
+              AND chapter_index = ?
+              AND part_index = ?
+              AND voice = ?
+              AND alignment_path != ''
+            "#,
+            params![book_id, chapter_index, part_index, voice],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !Path::new(&path).exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("Unable to read alignment {}", path))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("Invalid alignment JSON {}", path))
+        .map(Some)
+}
+
+pub fn save_part_alignment(
+    connection: &Connection,
+    alignment: &PartAlignmentPayload,
+    alignment_path: &Path,
+) -> Result<()> {
+    let timestamp = now_iso();
+    connection.execute(
+        r#"
+        INSERT INTO audio_alignments (
+            book_id, chapter_index, part_index, voice, audio_path, alignment_path, token_count,
+            duration_seconds, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+        ON CONFLICT(book_id, chapter_index, part_index, voice) DO UPDATE SET
+            audio_path = excluded.audio_path,
+            alignment_path = excluded.alignment_path,
+            token_count = excluded.token_count,
+            duration_seconds = excluded.duration_seconds,
+            last_error = '',
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            alignment.book_id,
+            alignment.chapter_index,
+            alignment.part_index,
+            alignment.voice,
+            alignment.audio_path,
+            path_to_string(alignment_path.to_path_buf()),
+            alignment.tokens.len() as i64,
+            alignment.duration_seconds,
+            timestamp,
+            timestamp
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn save_part_alignment_error(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+    audio_path: &str,
+    error: &str,
+) -> Result<()> {
+    let timestamp = now_iso();
+    connection.execute(
+        r#"
+        INSERT INTO audio_alignments (
+            book_id, chapter_index, part_index, voice, audio_path, alignment_path, token_count,
+            duration_seconds, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '', 0, 0, ?, ?, ?)
+        ON CONFLICT(book_id, chapter_index, part_index, voice) DO UPDATE SET
+            audio_path = excluded.audio_path,
+            alignment_path = '',
+            token_count = 0,
+            duration_seconds = 0,
+            last_error = excluded.last_error,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            book_id,
+            chapter_index,
+            part_index,
+            voice,
+            audio_path,
+            error,
+            timestamp,
+            timestamp
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_part_alignment(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+) -> Result<()> {
+    connection.execute(
+        r#"
+        DELETE FROM audio_alignments
+        WHERE book_id = ?
+          AND chapter_index = ?
+          AND part_index = ?
+          AND voice = ?
+        "#,
+        params![book_id, chapter_index, part_index, voice],
+    )?;
+    Ok(())
 }
 
 pub fn save_progress(
