@@ -90,6 +90,39 @@ export type BookSearchResult = {
   match_count: number;
 };
 
+export type DictionaryDefinition = {
+  entry_id: string;
+  word_type: string;
+  number: number;
+  definition: string;
+  examples: string[];
+  source_url: string;
+};
+
+export type DictionaryChoice = {
+  entry_id: string | null;
+  definition_number: number | null;
+  definition: string;
+  examples: string[];
+  ai_explanation: string;
+  matched: boolean;
+};
+
+export type DictionaryLookup = {
+  word: string;
+  selected_word: string;
+  word_type: string;
+  cefr_level: string;
+  phonetics: string[];
+  audio_url: string;
+  source_url: string;
+  definitions: DictionaryDefinition[];
+  context_definition: DictionaryChoice;
+  simple_meaning: string;
+  in_context_meaning: string;
+  original_meaning: string;
+};
+
 export type PartAudioPayload = {
   book_id: number;
   chapter_index: number;

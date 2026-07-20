@@ -26,11 +26,22 @@ import {
   getReader,
   importBooks,
   listBooks,
+  lookupWord,
   saveProgress,
   searchBook,
   syncPartAlignment,
 } from "@/lib/api";
-import type { BookSearchResult, BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress, TimedToken } from "@/types";
+import type {
+  BookSearchResult,
+  BookSummary,
+  ChapterPayload,
+  DictionaryLookup,
+  PartAlignmentPayload,
+  PartAudioPayload,
+  ReaderPayload,
+  ReadingProgress,
+  TimedToken,
+} from "@/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -87,6 +98,27 @@ type SaveProgressOptions = {
 type ActiveSearchResult = {
   blockIndex: number;
   query: string;
+};
+
+type WordContextMenuState = {
+  word: string;
+  rootWord: string;
+  context: string;
+  cefrLevel: string;
+  markedTokenKey: string;
+  lookupX: number;
+  lookupY: number;
+  x: number;
+  y: number;
+};
+
+type LookupDialogState = {
+  word: string;
+  x: number;
+  y: number;
+  loading: boolean;
+  error: string | null;
+  result: DictionaryLookup | null;
 };
 
 function App() {
@@ -333,9 +365,12 @@ function ReaderView({
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [activeSearchResult, setActiveSearchResult] = useState<ActiveSearchResult | null>(null);
   const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
+  const [wordContextMenu, setWordContextMenu] = useState<WordContextMenuState | null>(null);
+  const [lookupDialog, setLookupDialog] = useState<LookupDialogState | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const wordPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const dictionaryAudioRef = useRef<HTMLAudioElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -351,6 +386,7 @@ function ReaderView({
   const lastAutoScrollTokenRef = useRef<string | null>(null);
   const lastSelectionSeekKeyRef = useRef("");
   const searchRequestRef = useRef(0);
+  const lookupRequestRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -572,6 +608,8 @@ function ReaderView({
     lastSelectionSeekKeyRef.current = "";
     activeTimedTokenRef.current = null;
     setActiveTokenKey(null);
+    setWordContextMenu(null);
+    setLookupDialog(null);
   }, [chapterIndex, partIndex]);
 
   useEffect(() => {
@@ -1122,6 +1160,137 @@ function ReaderView({
     [bookId],
   );
 
+  useEffect(() => {
+    if (!wordContextMenu) {
+      return;
+    }
+    const close = () => setWordContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        close();
+      }
+    };
+    document.addEventListener("click", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("click", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [wordContextMenu]);
+
+  useEffect(() => {
+    if (!lookupDialog) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setLookupDialog(null);
+      }
+    };
+    const closeOnOutsidePointer = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".lookup-dialog")) {
+        return;
+      }
+      setLookupDialog(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("mousedown", closeOnOutsidePointer);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("mousedown", closeOnOutsidePointer);
+    };
+  }, [lookupDialog]);
+
+  const openWordContextMenu = useCallback(
+    (
+      token: ChapterPayload["blocks"][number]["tokens"][number],
+      blockText: string,
+      markedTokenKeyValue: string,
+      target: HTMLElement,
+      clientX: number,
+      clientY: number,
+    ) => {
+      if (!token.normalized_text) {
+        return;
+      }
+      const bounds = target.getBoundingClientRect();
+      const menuWidth = 176;
+      const menuHeight = 92;
+      const dialogWidth = 380;
+      setWordContextMenu({
+        word: token.text,
+        rootWord: token.root_text || token.normalized_text,
+        context: blockText,
+        cefrLevel: token.cefr_level || "",
+        markedTokenKey: markedTokenKeyValue,
+        x: clampNumber(clientX, 12, Math.max(12, window.innerWidth - menuWidth - 12)),
+        y: clampNumber(clientY, 72, Math.max(72, window.innerHeight - menuHeight - 12)),
+        lookupX: clampNumber(bounds.left + bounds.width / 2, 12, Math.max(12, window.innerWidth - dialogWidth - 12)),
+        lookupY: clampNumber(bounds.bottom + 8, 72, Math.max(72, window.innerHeight - 120)),
+      });
+    },
+    [],
+  );
+
+  const markContextMenuWord = useCallback(() => {
+    if (!wordContextMenu) {
+      return;
+    }
+    toggleMarkedToken(wordContextMenu.markedTokenKey);
+    setWordContextMenu(null);
+  }, [toggleMarkedToken, wordContextMenu]);
+
+  const lookupContextMenuWord = useCallback(() => {
+    if (!wordContextMenu) {
+      return;
+    }
+    const requestId = lookupRequestRef.current + 1;
+    lookupRequestRef.current = requestId;
+    const menu = wordContextMenu;
+    setWordContextMenu(null);
+    setLookupDialog({
+      word: menu.word,
+      x: menu.lookupX,
+      y: menu.lookupY,
+      loading: true,
+      error: null,
+      result: null,
+    });
+    dictionaryAudioRef.current?.pause();
+    void lookupWord(menu.word, `${menu.word}\n\n${menu.context}`, menu.cefrLevel, menu.rootWord)
+      .then((result) => {
+        if (lookupRequestRef.current !== requestId) {
+          return;
+        }
+        setLookupDialog({
+          word: menu.word,
+          x: menu.lookupX,
+          y: menu.lookupY,
+          loading: false,
+          error: null,
+          result,
+        });
+        if (result.audio_url && dictionaryAudioRef.current) {
+          dictionaryAudioRef.current.src = result.audio_url;
+          void dictionaryAudioRef.current.play().catch(() => undefined);
+        }
+      })
+      .catch((error) => {
+        if (lookupRequestRef.current !== requestId) {
+          return;
+        }
+        setLookupDialog({
+          word: menu.word,
+          x: menu.lookupX,
+          y: menu.lookupY,
+          loading: false,
+          error: errorMessage(error, "Lookup failed."),
+          result: null,
+        });
+      });
+  }, [wordContextMenu]);
+
   const openImage = useCallback((image: ReaderImage) => {
     setImageZoom(1);
     setDialogImage(image);
@@ -1427,6 +1596,7 @@ function ReaderView({
                           timedTokensByKey={timedTokensByKey}
                           onSeekToken={seekToTimedToken}
                           onToggleMarkedToken={toggleMarkedToken}
+                          onOpenWordContextMenu={openWordContextMenu}
                           onTokenRef={(tokenKey, node) => {
                             tokenRefs.current[tokenKey] = node;
                           }}
@@ -1448,6 +1618,16 @@ function ReaderView({
         </div>
         <audio ref={audioRef} preload="metadata" className="hidden" />
         <audio ref={wordPreviewAudioRef} preload="metadata" className="hidden" />
+        <audio ref={dictionaryAudioRef} preload="metadata" className="hidden" />
+        {wordContextMenu ? (
+          <WordContextMenu
+            menu={wordContextMenu}
+            marked={markedTokens.has(wordContextMenu.markedTokenKey)}
+            onLookup={lookupContextMenuWord}
+            onMark={markContextMenuWord}
+          />
+        ) : null}
+        {lookupDialog ? <LookupDialog lookup={lookupDialog} onClose={() => setLookupDialog(null)} /> : null}
         {dialogImage ? (
           <ImageDialog
             image={dialogImage}
@@ -1502,6 +1682,131 @@ function ReaderFigure({
         <img className="reader-image" src={image.src} alt={image.alt} />
       </button>
     </figure>
+  );
+}
+
+function WordContextMenu({
+  menu,
+  marked,
+  onLookup,
+  onMark,
+}: {
+  menu: WordContextMenuState;
+  marked: boolean;
+  onLookup: () => void;
+  onMark: () => void;
+}) {
+  return (
+    <div
+      className="reader-context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <button type="button" onClick={onLookup}>
+        Look up word
+      </button>
+      <button type="button" onClick={onMark}>
+        {marked ? "Unmark word" : "Mark word"}
+      </button>
+    </div>
+  );
+}
+
+function LookupDialog({ lookup, onClose }: { lookup: LookupDialogState; onClose: () => void }) {
+  const result = lookup.result;
+  const choice = result?.context_definition;
+  const examples = choice?.examples ?? [];
+  const displayWord = result?.selected_word || lookup.word;
+  return (
+    <div
+      className="lookup-dialog"
+      style={{ left: lookup.x, top: lookup.y }}
+      role="dialog"
+      aria-label={`${displayWord} lookup`}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <div className="lookup-toolbar">
+        <div className="lookup-title">
+          <strong>{displayWord}</strong>
+          <div className="lookup-badges">
+            {result?.cefr_level ? <Badge variant="secondary">{result.cefr_level}</Badge> : null}
+            {result?.word_type ? <Badge variant="outline">{result.word_type}</Badge> : null}
+          </div>
+        </div>
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close lookup">
+          <XIcon />
+        </Button>
+      </div>
+
+      {lookup.loading ? (
+        <div className="lookup-loading">
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      ) : null}
+
+      {lookup.error ? <p className="lookup-error">{lookup.error}</p> : null}
+
+      {result ? (
+        <div className="lookup-content">
+          {result.phonetics.length || result.audio_url ? (
+            <div className="lookup-pronunciation">
+              {result.phonetics.length ? <span>{result.phonetics.join("  ")}</span> : null}
+              {result.audio_url ? (
+                <audio controls src={result.audio_url} aria-label={`${displayWord} pronunciation`}>
+                  <track kind="captions" />
+                </audio>
+              ) : null}
+            </div>
+          ) : null}
+
+          <LookupSection title="Simple meaning" body={result.simple_meaning} />
+          <LookupSection title="In context" body={result.in_context_meaning} />
+
+          {choice?.matched && choice.definition ? (
+            <section className="lookup-section">
+              <h3>Oxford definition</h3>
+              <p>
+                {choice.definition_number ? <b>Definition {choice.definition_number}. </b> : null}
+                {choice.definition}
+              </p>
+              {result.source_url ? (
+                <a href={result.source_url} target="_blank" rel="noreferrer">
+                  Oxford Learner's Dictionary
+                </a>
+              ) : null}
+            </section>
+          ) : null}
+
+          <LookupSection title="Original meaning" body={result.original_meaning} />
+
+          {examples.length ? (
+            <section className="lookup-section">
+              <h3>Examples</h3>
+              <div className="lookup-examples">
+                {examples.slice(0, 3).map((example) => (
+                  <blockquote key={example}>{example}</blockquote>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LookupSection({ title, body }: { title: string; body: string }) {
+  if (!body.trim()) {
+    return null;
+  }
+  return (
+    <section className="lookup-section">
+      <h3>{title}</h3>
+      <p>{body}</p>
+    </section>
   );
 }
 
@@ -1850,6 +2155,7 @@ function ReaderTokens({
   timedTokensByKey,
   onSeekToken,
   onToggleMarkedToken,
+  onOpenWordContextMenu,
   onTokenRef,
 }: {
   block: ChapterPayload["blocks"][number];
@@ -1861,6 +2167,14 @@ function ReaderTokens({
   timedTokensByKey: Map<string, TimedToken>;
   onSeekToken: (blockIndex: number, tokenIndex: number) => void;
   onToggleMarkedToken: (tokenKey: string) => void;
+  onOpenWordContextMenu: (
+    token: ChapterPayload["blocks"][number]["tokens"][number],
+    blockText: string,
+    markedTokenKeyValue: string,
+    target: HTMLElement,
+    clientX: number,
+    clientY: number,
+  ) => void;
   onTokenRef: (tokenKey: string, node: HTMLElement | null) => void;
 }) {
   if (!block.tokens.length) {
@@ -1905,7 +2219,11 @@ function ReaderTokens({
             }}
             onContextMenu={(event) => {
               event.preventDefault();
-              onToggleMarkedToken(tokenKey);
+              if (token.normalized_text) {
+                onOpenWordContextMenu(token, block.text, tokenKey, event.currentTarget, event.clientX, event.clientY);
+              } else {
+                onToggleMarkedToken(tokenKey);
+              }
             }}
           >
             {token.text}

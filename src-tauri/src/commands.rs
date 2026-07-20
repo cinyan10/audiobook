@@ -103,6 +103,18 @@ pub fn search_book(
 }
 
 #[tauri::command]
+pub async fn lookup_word(
+    word: String,
+    context: String,
+    cefr_level: String,
+    root_word: String,
+) -> Result<crate::dictionary::DictionaryLookup, String> {
+    crate::dictionary::lookup_word(word, context, cefr_level, root_word)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_part_audio(
     book_id: i64,
     chapter_index: i64,

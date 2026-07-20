@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { BookSearchResult, BookSummary, ChapterPayload, ImportSummary, PartAlignmentPayload, PartAudioPayload, ReaderPayload } from "@/types";
+import type {
+  BookSearchResult,
+  BookSummary,
+  ChapterPayload,
+  DictionaryLookup,
+  ImportSummary,
+  PartAlignmentPayload,
+  PartAudioPayload,
+  ReaderPayload,
+} from "@/types";
 
 export function listBooks() {
   return invoke<BookSummary[]>("list_books");
@@ -20,6 +29,15 @@ export function getChapter(bookId: number, chapterIndex: number) {
 
 export function searchBook(bookId: number, query: string) {
   return invoke<BookSearchResult[]>("search_book", { bookId, query });
+}
+
+export function lookupWord(word: string, context: string, cefrLevel: string, rootWord: string) {
+  return invoke<DictionaryLookup>("lookup_word", {
+    word,
+    context,
+    cefrLevel,
+    rootWord,
+  });
 }
 
 export function getPartAudio(bookId: number, chapterIndex: number, partIndex: number) {

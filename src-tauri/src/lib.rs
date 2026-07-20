@@ -1,6 +1,7 @@
 mod cefr;
 mod commands;
 mod db;
+mod dictionary;
 mod epub;
 mod models;
 
@@ -35,6 +36,7 @@ pub fn run() {
             commands::get_reader,
             commands::get_chapter,
             commands::search_book,
+            commands::lookup_word,
             commands::get_part_audio,
             commands::get_part_alignment,
             commands::generate_part_audio,
