@@ -80,6 +80,18 @@ pub struct ChapterPayload {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BookSearchResult {
+    pub book_id: i64,
+    pub chapter_index: i64,
+    pub chapter_title: String,
+    pub block_index: i64,
+    pub snippet: String,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub match_count: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PartAudioPayload {
     pub book_id: i64,
     pub chapter_index: i64,

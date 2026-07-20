@@ -12,8 +12,8 @@ use crate::cefr::{CefrLevel, ReaderToken};
 use crate::epub;
 use crate::epub::ExtractedBlockKind;
 use crate::models::{
-    BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload, ChapterSummary,
-    PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress,
+    BookSearchResult, BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload,
+    ChapterSummary, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress,
 };
 
 const SCHEMA: &str = r#"
@@ -117,7 +117,8 @@ CREATE TABLE IF NOT EXISTS book_word_frequencies (
 
 CREATE TABLE IF NOT EXISTS book_word_frequency_cache (
     book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
-    generated_at TEXT NOT NULL
+    generated_at TEXT NOT NULL,
+    algorithm_version INTEGER NOT NULL DEFAULT 6
 );
 
 CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
@@ -132,6 +133,8 @@ pub enum ImportOutcome {
     Imported,
     Skipped,
 }
+
+const WORD_FREQUENCY_ALGORITHM_VERSION: i64 = 6;
 
 #[derive(Debug)]
 pub struct AudioParagraphSource {
@@ -166,6 +169,7 @@ pub fn connect(path: &Path) -> Result<Connection> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.execute_batch(SCHEMA)?;
     migrate_reading_progress(&connection)?;
+    migrate_word_frequency_cache(&connection)?;
     Ok(connection)
 }
 
@@ -212,6 +216,20 @@ fn migrate_reading_progress(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_word_frequency_cache(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(book_word_frequency_cache)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "algorithm_version") {
+        connection.execute(
+            "ALTER TABLE book_word_frequency_cache ADD COLUMN algorithm_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
     let mut statement = connection.prepare(
         r#"
@@ -249,8 +267,7 @@ pub fn list_books(connection: &Connection) -> Result<Vec<BookSummary>> {
     rows.into_iter()
         .map(|(mut book, last_block_index)| {
             if let Some(block_index) = last_block_index {
-                if let Some(percent) =
-                    progress_percent_for_block(connection, book.id, block_index)?
+                if let Some(percent) = progress_percent_for_block(connection, book.id, block_index)?
                 {
                     book.progress_percent = percent;
                 }
@@ -344,7 +361,11 @@ pub fn import_book(
                 block
                     .asset_path
                     .as_deref()
-                    .and_then(|path| materialize_epub_asset(source_path, &assets_dir, path).ok().flatten())
+                    .and_then(|path| {
+                        materialize_epub_asset(source_path, &assets_dir, path)
+                            .ok()
+                            .flatten()
+                    })
                     .or_else(|| block.asset_path.clone())
             } else {
                 None
@@ -467,7 +488,9 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
             progress_percent: 0.0,
         });
     let mut progress = normalize_reading_progress(progress, &chapters);
-    if let Some(percent) = progress_percent_for_block(connection, book_id, progress.last_block_index)? {
+    if let Some(percent) =
+        progress_percent_for_block(connection, book_id, progress.last_block_index)?
+    {
         progress.progress_percent = percent;
     }
 
@@ -556,6 +579,64 @@ pub fn get_chapter(
     }))
 }
 
+pub fn search_book(
+    connection: &Connection,
+    book_id: i64,
+    query: &str,
+) -> Result<Vec<BookSearchResult>> {
+    let Some(query) = normalized_search_query(query) else {
+        return Ok(Vec::new());
+    };
+    let chapters = chapter_summaries(connection, book_id)?;
+    if chapters.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT block_index, text
+        FROM chapter_blocks
+        WHERE book_id = ?
+          AND kind = 'paragraph'
+          AND text != ''
+        ORDER BY block_index
+        "#,
+    )?;
+    let rows = statement.query_map(params![book_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let (block_index, text) = row?;
+        let Some((match_start, match_end)) = case_insensitive_match_range(&text, &query) else {
+            continue;
+        };
+        let Some(chapter) = chapters.iter().find(|chapter| {
+            block_index >= chapter.start_block_index && block_index <= chapter.end_block_index
+        }) else {
+            continue;
+        };
+        let (snippet, snippet_match_start, snippet_match_end) =
+            search_snippet(&text, match_start, match_end);
+        results.push(BookSearchResult {
+            book_id,
+            chapter_index: chapter.chapter_index,
+            chapter_title: chapter.title.clone(),
+            block_index,
+            snippet,
+            match_start: snippet_match_start,
+            match_end: snippet_match_end,
+            match_count: count_case_insensitive_matches(&text, &query),
+        });
+        if results.len() >= 100 {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
 pub fn get_part_audio(
     connection: &Connection,
     book_id: i64,
@@ -601,7 +682,8 @@ pub fn get_part_audio(
                     paragraph_count: row.get(5)?,
                     duration_seconds: row.get(6)?,
                     generated_at: row.get(7)?,
-                    alignment_available: !alignment_path.is_empty() && Path::new(&alignment_path).exists(),
+                    alignment_available: !alignment_path.is_empty()
+                        && Path::new(&alignment_path).exists(),
                     alignment_error: if alignment_error.is_empty() {
                         None
                     } else {
@@ -923,8 +1005,7 @@ pub fn save_progress(
     let timestamp = now_iso();
     let progress = progress_percent.clamp(0.0, 100.0);
     let scroll = scroll_ratio.clamp(0.0, 1.0);
-    let duration = audio_duration_seconds
-        .filter(|value| value.is_finite() && *value > 0.0);
+    let duration = audio_duration_seconds.filter(|value| value.is_finite() && *value > 0.0);
     let audio_time = audio_time_seconds
         .filter(|value| value.is_finite() && *value >= 0.0)
         .map(|value| duration.map_or(value, |duration| value.min(duration)));
@@ -943,12 +1024,9 @@ pub fn save_progress(
         },
         &chapter_summaries(connection, book_id)?,
     );
-    let progress_percent = progress_percent_for_block(
-        connection,
-        book_id,
-        normalized.last_block_index,
-    )?
-    .unwrap_or(normalized.progress_percent);
+    let progress_percent =
+        progress_percent_for_block(connection, book_id, normalized.last_block_index)?
+            .unwrap_or(normalized.progress_percent);
     connection.execute(
         r#"
         INSERT INTO reading_progress (
@@ -1072,10 +1150,9 @@ fn progress_percent_for_block(
         return Ok(None);
     }
 
-    let Some(chapter) = chapters
-        .iter()
-        .find(|chapter| block_index >= chapter.start_block_index && block_index <= chapter.end_block_index)
-    else {
+    let Some(chapter) = chapters.iter().find(|chapter| {
+        block_index >= chapter.start_block_index && block_index <= chapter.end_block_index
+    }) else {
         return Ok(None);
     };
 
@@ -1356,6 +1433,79 @@ fn readable_chapter_blocks(chapter_title: &str, blocks: Vec<ChapterBlock>) -> Ve
         .collect()
 }
 
+fn normalized_search_query(query: &str) -> Option<String> {
+    let query = query.trim();
+    (query.chars().count() >= 2).then(|| query.to_string())
+}
+
+fn case_insensitive_match_range(text: &str, query: &str) -> Option<(usize, usize)> {
+    let query_chars = query
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+        .collect::<Vec<_>>();
+    if query_chars.is_empty() {
+        return None;
+    }
+    let text_chars = text.char_indices().collect::<Vec<_>>();
+    for start in 0..text_chars.len() {
+        let mut matched = 0_usize;
+        for end in start..text_chars.len() {
+            for character in text_chars[end].1.to_lowercase() {
+                if query_chars.get(matched) != Some(&character) {
+                    matched = 0;
+                    break;
+                }
+                matched += 1;
+                if matched == query_chars.len() {
+                    let start_byte = text_chars[start].0;
+                    let end_byte = text_chars
+                        .get(end + 1)
+                        .map(|(index, _)| *index)
+                        .unwrap_or(text.len());
+                    return Some((start_byte, end_byte));
+                }
+            }
+            if matched == 0 {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn count_case_insensitive_matches(text: &str, query: &str) -> usize {
+    let mut count = 0_usize;
+    let mut remaining = text;
+    while let Some((_, end)) = case_insensitive_match_range(remaining, query) {
+        count += 1;
+        remaining = &remaining[end..];
+    }
+    count
+}
+
+fn search_snippet(text: &str, match_start: usize, match_end: usize) -> (String, usize, usize) {
+    const BEFORE: usize = 56;
+    const AFTER: usize = 76;
+
+    let match_start_char = text[..match_start].chars().count();
+    let match_end_char = text[..match_end].chars().count();
+    let total_chars = text.chars().count();
+    let start_char = match_start_char.saturating_sub(BEFORE);
+    let end_char = (match_end_char + AFTER).min(total_chars);
+    let prefix = if start_char > 0 { "..." } else { "" };
+    let suffix = if end_char < total_chars { "..." } else { "" };
+    let body = text
+        .chars()
+        .skip(start_char)
+        .take(end_char.saturating_sub(start_char))
+        .collect::<String>();
+    let snippet = format!("{prefix}{body}{suffix}");
+    let match_offset = prefix.len() + match_start_char.saturating_sub(start_char);
+    let snippet_match_start = match_offset;
+    let snippet_match_end = snippet_match_start + match_end_char.saturating_sub(match_start_char);
+    (snippet, snippet_match_start, snippet_match_end)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WordFrequency {
     count: usize,
@@ -1369,10 +1519,10 @@ fn with_reader_tokens(
     if block.kind == "paragraph" {
         block.tokens = cefr::tokenize_text(&block.text);
         for token in &mut block.tokens {
-            let Some(key) = token_frequency_key(token) else {
+            let Some(key) = canonical_frequency_key(token) else {
                 continue;
             };
-            if let Some(frequency) = frequencies.get(key) {
+            if let Some(frequency) = frequencies.get(&key) {
                 token.frequency_level = Some(frequency.level);
                 token.frequency_count = Some(frequency.count);
             }
@@ -1408,14 +1558,14 @@ fn book_word_frequency_map(
 }
 
 fn ensure_book_word_frequency_cache(connection: &Connection, book_id: i64) -> Result<()> {
-    let cache_built: Option<i64> = connection
+    let cache_version: Option<i64> = connection
         .query_row(
-            "SELECT book_id FROM book_word_frequency_cache WHERE book_id = ?",
+            "SELECT algorithm_version FROM book_word_frequency_cache WHERE book_id = ?",
             params![book_id],
             |row| row.get(0),
         )
         .optional()?;
-    if cache_built.is_some() {
+    if cache_version.is_some_and(|version| version >= WORD_FREQUENCY_ALGORITHM_VERSION) {
         return Ok(());
     }
 
@@ -1441,10 +1591,10 @@ fn ensure_book_word_frequency_cache(connection: &Connection, book_id: i64) -> Re
     }
     connection.execute(
         r#"
-        INSERT OR REPLACE INTO book_word_frequency_cache (book_id, generated_at)
-        VALUES (?, ?)
+        INSERT OR REPLACE INTO book_word_frequency_cache (book_id, generated_at, algorithm_version)
+        VALUES (?, ?, ?)
         "#,
-        params![book_id, now_iso()],
+        params![book_id, now_iso(), WORD_FREQUENCY_ALGORITHM_VERSION],
     )?;
     Ok(())
 }
@@ -1490,8 +1640,8 @@ fn build_book_word_frequency_entries(
         let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for block in readable_chapter_blocks(&chapter.title, blocks) {
             for token in cefr::tokenize_text(&block.text) {
-                if let Some(key) = token_frequency_key(&token) {
-                    *counts.entry(key.to_string()).or_default() += 1;
+                if let Some(key) = canonical_frequency_key(&token) {
+                    *counts.entry(key).or_default() += 1;
                 }
             }
         }
@@ -1507,24 +1657,28 @@ fn build_book_word_frequency_entries(
     if total == 0 {
         return Ok(Vec::new());
     }
+    let non_a1_max_count = ranked
+        .iter()
+        .filter(|(word_key, _)| !cefr::is_oxford_3000_a1_word(word_key))
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(1);
 
     let mut entries = Vec::with_capacity(total);
     let mut index = 0;
     while index < ranked.len() {
         let count = ranked[index].1;
-        let level = frequency_level_for_rank(index, total);
         let mut end = index + 1;
         while end < ranked.len() && ranked[end].1 == count {
             end += 1;
         }
         for (word_key, _) in &ranked[index..end] {
-            entries.push((
-                word_key.clone(),
-                WordFrequency {
-                    count,
-                    level,
-                },
-            ));
+            let level = if cefr::is_oxford_3000_a1_word(word_key) {
+                CefrLevel::A1
+            } else {
+                frequency_level_for_non_a1_count(count, non_a1_max_count)
+            };
+            entries.push((word_key.clone(), WordFrequency { count, level }));
         }
         index = end;
     }
@@ -1532,23 +1686,33 @@ fn build_book_word_frequency_entries(
 }
 
 fn token_frequency_key(token: &ReaderToken) -> Option<&str> {
-    if !token.root_text.is_empty() {
-        Some(&token.root_text)
-    } else if !token.normalized_text.is_empty() {
+    if !token.normalized_text.is_empty() {
         Some(&token.normalized_text)
     } else {
         None
     }
 }
 
-fn frequency_level_for_rank(rank: usize, total: usize) -> CefrLevel {
-    match (rank * 6) / total.max(1) {
-        0 => CefrLevel::A1,
-        1 => CefrLevel::A2,
-        2 => CefrLevel::B1,
-        3 => CefrLevel::B2,
-        4 => CefrLevel::C1,
-        _ => CefrLevel::C2,
+fn canonical_frequency_key(token: &ReaderToken) -> Option<String> {
+    token_frequency_key(token).and_then(cefr::frequency_key)
+}
+
+fn frequency_level_for_non_a1_count(count: usize, max_count: usize) -> CefrLevel {
+    if max_count <= 1 {
+        return CefrLevel::C2;
+    }
+    // Zipfian word frequencies have a long tail, so compare non-A1 counts in log space.
+    let score = (count.max(1) as f64).ln() / (max_count as f64).ln();
+    if score >= 4.0 / 5.0 {
+        CefrLevel::A2
+    } else if score >= 3.0 / 5.0 {
+        CefrLevel::B1
+    } else if score >= 2.0 / 5.0 {
+        CefrLevel::B2
+    } else if score >= 1.0 / 5.0 {
+        CefrLevel::C1
+    } else {
+        CefrLevel::C2
     }
 }
 
@@ -1740,7 +1904,9 @@ fn materialize_epub_asset(
         Ok(bytes) => bytes,
         Err(_) => return Ok(None),
     };
-    let local_path = assets_dir.join("images").join(normalized_relative_path(asset_path));
+    let local_path = assets_dir
+        .join("images")
+        .join(normalized_relative_path(asset_path));
     if let Some(parent) = local_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1906,9 +2072,23 @@ mod tests {
         ensure_book_word_frequency_cache(&connection, 1).expect("cache");
         let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
 
-        assert_eq!(frequencies.get("blue").map(|frequency| frequency.count), Some(4));
-        assert_eq!(frequencies.get("mid").map(|frequency| frequency.count), Some(2));
-        assert_eq!(frequencies.get("rare").map(|frequency| frequency.count), Some(1));
+        assert_eq!(frequencies.get("the").map(|frequency| frequency.count), Some(1));
+        assert_eq!(
+            frequencies
+                .get("wugalpha")
+                .map(|frequency| frequency.count),
+            Some(4)
+        );
+        assert_eq!(
+            frequencies.get("wugbeta").map(|frequency| frequency.count),
+            Some(2)
+        );
+        assert_eq!(
+            frequencies
+                .get("wuggamma")
+                .map(|frequency| frequency.count),
+            Some(1)
+        );
         assert!(!frequencies.contains_key("copyrightonly"));
         assert!(!frequencies.contains_key("headingonly"));
     }
@@ -1918,10 +2098,12 @@ mod tests {
         let connection = frequency_test_connection();
         let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
 
-        assert_eq!(frequencies["blue"].level, CefrLevel::A1);
+        assert_eq!(frequencies["the"].level, CefrLevel::A1);
+        assert_eq!(frequencies["wugalpha"].level, CefrLevel::A2);
+        assert_eq!(frequencies["wuggamma"].level, CefrLevel::C2);
         assert!(
-            frequency_level_rank(frequencies["blue"].level)
-                < frequency_level_rank(frequencies["rare"].level)
+            frequency_level_rank(frequencies["wugalpha"].level)
+                < frequency_level_rank(frequencies["wuggamma"].level)
         );
     }
 
@@ -1934,11 +2116,11 @@ mod tests {
         let token = chapter.blocks[0]
             .tokens
             .iter()
-            .find(|token| token.normalized_text == "blue")
-            .expect("blue token");
+            .find(|token| token.normalized_text == "wugalpha")
+            .expect("wugalpha token");
 
         assert_eq!(token.frequency_count, Some(4));
-        assert_eq!(token.frequency_level, Some(CefrLevel::A1));
+        assert_eq!(token.frequency_level, Some(CefrLevel::A2));
     }
 
     #[test]
@@ -1949,7 +2131,7 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
-                VALUES (1, 1, 5, 'paragraph', 'blue newword', NULL, '')
+                VALUES (1, 1, 5, 'paragraph', 'wugalpha newword', NULL, '')
                 "#,
                 [],
             )
@@ -1958,7 +2140,7 @@ mod tests {
         ensure_book_word_frequency_cache(&connection, 1).expect("cached");
         let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
 
-        assert_eq!(frequencies.get("blue").map(|frequency| frequency.count), Some(4));
+        assert_eq!(frequencies.get("wugalpha").map(|frequency| frequency.count), Some(4));
         assert!(!frequencies.contains_key("newword"));
     }
 
@@ -1982,6 +2164,85 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(10, 14), (15, 20)]
         );
+    }
+
+    #[test]
+    fn search_book_ignores_empty_and_short_queries() {
+        let connection = search_test_connection();
+
+        assert!(search_book(&connection, 1, "").expect("empty").is_empty());
+        assert!(search_book(&connection, 1, "a").expect("short").is_empty());
+    }
+
+    #[test]
+    fn search_book_finds_case_insensitive_paragraph_matches_in_order() {
+        let connection = search_test_connection();
+
+        let results = search_book(&connection, 1, "Lantern").expect("results");
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| (result.chapter_index, result.block_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (1, 3)]
+        );
+        assert_eq!(results[0].chapter_title, "1 One");
+        assert_eq!(results[0].match_count, 2);
+        assert!(results[0].snippet.contains("Lantern"));
+    }
+
+    #[test]
+    fn search_book_ignores_image_blocks() {
+        let connection = search_test_connection();
+
+        let results = search_book(&connection, 1, "imageonly").expect("results");
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_book_caps_results() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash-search-cap', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        connection
+            .execute(
+                r#"
+                INSERT INTO book_chapters (
+                    book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                ) VALUES (1, 0, '1 One', 'chapter001.xhtml', 0, 120)
+                "#,
+                [],
+            )
+            .expect("chapter");
+        for block_index in 0..120 {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                    VALUES (1, 0, ?, 'paragraph', 'needle text', NULL, '')
+                    "#,
+                    params![block_index],
+                )
+                .expect("block");
+        }
+
+        let results = search_book(&connection, 1, "needle").expect("results");
+
+        assert_eq!(results.len(), 100);
+        assert_eq!(results[99].block_index, 99);
     }
 
     #[test]
@@ -2190,20 +2451,8 @@ mod tests {
             10.0,
         )
         .expect("audio save");
-        save_progress(
-            &connection,
-            1,
-            0,
-            0,
-            42,
-            0.2,
-            None,
-            None,
-            None,
-            None,
-            10.0,
-        )
-        .expect("scroll save");
+        save_progress(&connection, 1, 0, 0, 42, 0.2, None, None, None, None, 10.0)
+            .expect("scroll save");
 
         let reader = get_reader(&connection, 1).expect("reader").expect("book");
         assert_eq!(reader.progress.last_scroll_ratio, 0.2);
@@ -2258,20 +2507,7 @@ mod tests {
                 .expect("block");
         }
 
-        save_progress(
-            &connection,
-            1,
-            2,
-            0,
-            2,
-            0.0,
-            None,
-            None,
-            None,
-            None,
-            99.0,
-        )
-        .expect("save");
+        save_progress(&connection, 1, 2, 0, 2, 0.0, None, None, None, None, 99.0).expect("save");
 
         let reader = get_reader(&connection, 1).expect("reader").expect("book");
         assert_eq!(reader.total_progress_units, 200);
@@ -2315,8 +2551,8 @@ mod tests {
         for (chapter_index, block_index, text) in [
             (0, 0, "copyrightonly copyrightonly"),
             (1, 1, "0 Headingonly"),
-            (1, 2, "blue blue blue mid rare"),
-            (1, 3, "blue mid"),
+            (1, 2, "the wugalpha wugalpha wugalpha wugbeta wuggamma"),
+            (1, 3, "wugalpha wugbeta"),
             (2, 4, "notesonly notesonly notesonly"),
         ] {
             connection
@@ -2326,6 +2562,70 @@ mod tests {
                     VALUES (1, ?, ?, 'paragraph', ?, NULL, '')
                     "#,
                     params![chapter_index, block_index, text],
+                )
+                .expect("block");
+        }
+        connection
+    }
+
+    fn search_test_connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash-search', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        for (chapter_index, title, source_href, start_block_index, end_block_index) in [
+            (0, "1 One", "chapter001.xhtml", 0, 2),
+            (1, "2 Two", "chapter002.xhtml", 3, 4),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO book_chapters (
+                        book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                    "#,
+                    params![chapter_index, title, source_href, start_block_index, end_block_index],
+                )
+                .expect("chapter");
+        }
+        for (chapter_index, block_index, kind, text, asset_path, alt) in [
+            (0, 0, "paragraph", "A quiet opening paragraph", None, ""),
+            (
+                0,
+                1,
+                "paragraph",
+                "Lantern light and another lantern on the wall",
+                None,
+                "",
+            ),
+            (0, 2, "image", "", Some("imageonly.png"), "imageonly"),
+            (
+                1,
+                3,
+                "paragraph",
+                "The final LANTERN waited upstairs",
+                None,
+                "",
+            ),
+            (1, 4, "paragraph", "No matching term here", None, ""),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                    VALUES (1, ?, ?, ?, ?, ?, ?)
+                    "#,
+                    params![chapter_index, block_index, kind, text, asset_path, alt],
                 )
                 .expect("block");
         }

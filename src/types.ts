@@ -79,6 +79,17 @@ export type ChapterPayload = {
   blocks: ChapterBlock[];
 };
 
+export type BookSearchResult = {
+  book_id: number;
+  chapter_index: number;
+  chapter_title: string;
+  block_index: number;
+  snippet: string;
+  match_start: number;
+  match_end: number;
+  match_count: number;
+};
+
 export type PartAudioPayload = {
   book_id: number;
   chapter_index: number;

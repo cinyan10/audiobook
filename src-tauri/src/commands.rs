@@ -90,6 +90,19 @@ pub fn get_chapter(
 }
 
 #[tauri::command]
+pub fn search_book(
+    book_id: i64,
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::models::BookSearchResult>, String> {
+    let connection = state
+        .db
+        .lock()
+        .map_err(|_| "Database lock failed.".to_string())?;
+    db::search_book(&connection, book_id, &query).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_part_audio(
     book_id: i64,
     chapter_index: i64,
@@ -353,7 +366,8 @@ pub async fn generate_part_audio(
             .db
             .lock()
             .map_err(|_| "Database lock failed.".to_string())?;
-        let saved = db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())?;
+        let saved =
+            db::save_part_audio(&mut connection, &generated).map_err(|error| error.to_string())?;
         db::delete_part_alignment(
             &connection,
             book_id,
@@ -637,7 +651,12 @@ fn build_alignment_request(
     for paragraph in paragraphs {
         let generated = generated_by_block
             .get(&paragraph.block_index)
-            .ok_or_else(|| format!("Generated audio missing for block {}.", paragraph.block_index))?;
+            .ok_or_else(|| {
+                format!(
+                    "Generated audio missing for block {}.",
+                    paragraph.block_index
+                )
+            })?;
         let tokens = cefr::tokenize_text(&paragraph.text)
             .into_iter()
             .enumerate()
@@ -767,7 +786,8 @@ where
 
     let mut stdout_details = Vec::new();
     for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| format!("Unable to read Kokoro generator output: {error}"))?;
+        let line =
+            line.map_err(|error| format!("Unable to read Kokoro generator output: {error}"))?;
         if let Ok(progress) = serde_json::from_str::<GeneratorProgressLine>(&line) {
             if progress.event == "progress" {
                 on_progress(progress);
@@ -808,10 +828,7 @@ fn worker_python_path(repo_root: &Path) -> PathBuf {
 
 fn default_python_path(repo_root: &Path) -> PathBuf {
     if cfg!(windows) {
-        repo_root
-            .join(".venv")
-            .join("Scripts")
-            .join("python.exe")
+        repo_root.join(".venv").join("Scripts").join("python.exe")
     } else {
         repo_root.join(".venv").join("bin").join("python")
     }

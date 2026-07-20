@@ -34,6 +34,7 @@ pub fn run() {
             commands::import_books,
             commands::get_reader,
             commands::get_chapter,
+            commands::search_book,
             commands::get_part_audio,
             commands::get_part_alignment,
             commands::generate_part_audio,

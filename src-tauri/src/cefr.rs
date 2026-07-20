@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use csv::ReaderBuilder;
@@ -7,8 +7,10 @@ use serde::Serialize;
 const CEFRJ_VOCABULARY: &str = include_str!("../assets/cefr/cefrj-vocabulary-profile-1.5.csv");
 const OCTANOVE_C1C2_VOCABULARY: &str =
     include_str!("../assets/cefr/octanove-vocabulary-profile-c1c2-1.0.csv");
+const OXFORD_3000_A1: &str = include_str!("../assets/cefr/oxford-3000-a1.txt");
 
 static PROFILE: LazyLock<HashMap<String, CefrLevel>> = LazyLock::new(load_profile);
+static OXFORD_3000_A1_WORDS: LazyLock<HashSet<String>> = LazyLock::new(load_oxford_3000_a1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum CefrLevel {
@@ -93,6 +95,46 @@ pub fn lookup_level(word: &str) -> Option<CefrLevel> {
     Some(CefrLevel::C2)
 }
 
+pub fn is_oxford_3000_a1_word(word: &str) -> bool {
+    let normalized = normalize_word_text(word);
+    if normalized.is_empty() {
+        return false;
+    }
+    lookup_candidates(&normalized)
+        .iter()
+        .any(|candidate| OXFORD_3000_A1_WORDS.contains(candidate))
+}
+
+pub fn frequency_key(word: &str) -> Option<String> {
+    let normalized = normalize_word_text(word);
+    if normalized.is_empty() {
+        return None;
+    }
+    let candidates = lookup_candidates(&normalized);
+    if let Some(candidate) = candidates
+        .iter()
+        .find(|candidate| OXFORD_3000_A1_WORDS.contains(*candidate))
+    {
+        return Some(candidate.clone());
+    }
+    candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            PROFILE
+                .get(&candidate)
+                .map(|level| (candidate, level.rank()))
+        })
+        .min_by(|(left_word, left_rank), (right_word, right_rank)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| left_word.len().cmp(&right_word.len()))
+                .then_with(|| left_word.cmp(right_word))
+        })
+        .map(|(candidate, _)| candidate)
+        .or_else(|| fallback_frequency_stem(&normalized))
+        .or(Some(normalized))
+}
+
 fn push_token(tokens: &mut Vec<ReaderToken>, text: &str) {
     if text.is_empty() {
         return;
@@ -120,6 +162,14 @@ fn load_profile() -> HashMap<String, CefrLevel> {
     load_profile_csv(&mut profile, CEFRJ_VOCABULARY);
     load_profile_csv(&mut profile, OCTANOVE_C1C2_VOCABULARY);
     profile
+}
+
+fn load_oxford_3000_a1() -> HashSet<String> {
+    OXFORD_3000_A1
+        .lines()
+        .map(normalize_word_text)
+        .filter(|word| !word.is_empty())
+        .collect()
 }
 
 fn load_profile_csv(profile: &mut HashMap<String, CefrLevel>, source: &str) {
@@ -230,6 +280,39 @@ fn root_word(word: &str) -> String {
     normalized
 }
 
+fn fallback_frequency_stem(word: &str) -> Option<String> {
+    if word.len() > 4 && word.ends_with("ied") {
+        return Some(format!("{}y", &word[..word.len() - 3]));
+    }
+    if word.len() > 4 && word.ends_with("ed") {
+        let stem = &word[..word.len() - 2];
+        if stem.ends_with('g') || stem.ends_with('v') || stem.ends_with('z') {
+            return Some(format!("{stem}e"));
+        }
+        return Some(stem.to_string());
+    }
+    if word.len() > 5 && word.ends_with("ing") {
+        let stem = &word[..word.len() - 3];
+        if stem.len() > 2 {
+            let mut chars = stem.chars().rev();
+            if chars.next() == chars.next() {
+                return Some(stem[..stem.len() - 1].to_string());
+            }
+        }
+        if stem.ends_with('g') || stem.ends_with('v') || stem.ends_with('z') {
+            return Some(format!("{stem}e"));
+        }
+        return Some(stem.to_string());
+    }
+    if word.len() > 4 && word.ends_with("es") {
+        return Some(word[..word.len() - 2].to_string());
+    }
+    if word.len() > 3 && word.ends_with('s') && !word.ends_with("ss") {
+        return Some(word[..word.len() - 1].to_string());
+    }
+    None
+}
+
 fn normalize_word_text(text: &str) -> String {
     let normalized = text.trim().replace('’', "'").to_ascii_lowercase();
     if normalized.is_empty()
@@ -308,6 +391,8 @@ fn contraction_root(word: &str) -> Option<&'static str> {
 
 fn irregular_root(word: &str) -> Option<&'static str> {
     match word {
+        "am" => Some("be"),
+        "are" => Some("be"),
         "been" => Some("be"),
         "came" => Some("come"),
         "did" => Some("do"),
@@ -316,6 +401,7 @@ fn irregular_root(word: &str) -> Option<&'static str> {
         "got" => Some("get"),
         "had" => Some("have"),
         "held" => Some("hold"),
+        "is" => Some("be"),
         "knew" => Some("know"),
         "known" => Some("know"),
         "made" => Some("make"),
@@ -335,7 +421,7 @@ fn irregular_root(word: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup_level, tokenize_text, CefrLevel};
+    use super::{is_oxford_3000_a1_word, lookup_level, tokenize_text, CefrLevel};
 
     #[test]
     fn looks_up_direct_words() {
@@ -375,6 +461,25 @@ mod tests {
     #[test]
     fn treats_unknown_words_as_c2() {
         assert_eq!(lookup_level("flibbertigibbet"), Some(CefrLevel::C2));
+    }
+
+    #[test]
+    fn recognizes_oxford_3000_a1_words() {
+        assert!(is_oxford_3000_a1_word("the"));
+        assert!(is_oxford_3000_a1_word("running"));
+        assert!(is_oxford_3000_a1_word("working"));
+        assert!(!is_oxford_3000_a1_word("flibbertigibbet"));
+    }
+
+    #[test]
+    fn maps_inflections_to_known_frequency_keys() {
+        assert_eq!(super::frequency_key("working").as_deref(), Some("work"));
+        assert_eq!(super::frequency_key("worked").as_deref(), Some("work"));
+        assert_eq!(super::frequency_key("works").as_deref(), Some("work"));
+        assert_eq!(super::frequency_key("entered").as_deref(), Some("enter"));
+        assert_eq!(super::frequency_key("entering").as_deref(), Some("enter"));
+        assert_eq!(super::frequency_key("engaged").as_deref(), Some("engage"));
+        assert_eq!(super::frequency_key("engaging").as_deref(), Some("engage"));
     }
 
     #[test]

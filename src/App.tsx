@@ -10,11 +10,12 @@ import {
   MenuIcon,
   PauseIcon,
   PlayIcon,
+  SearchIcon,
   XIcon,
   ZoomInIcon,
   ZoomOutIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { toast } from "sonner";
 
 import {
@@ -26,9 +27,10 @@ import {
   importBooks,
   listBooks,
   saveProgress,
+  searchBook,
   syncPartAlignment,
 } from "@/lib/api";
-import type { BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress, TimedToken } from "@/types";
+import type { BookSearchResult, BookSummary, ChapterPayload, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress, TimedToken } from "@/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -80,6 +82,11 @@ type SaveProgressOptions = {
   audioTimeSeconds?: number | null;
   audioDurationSeconds?: number | null;
   lastPlayingToken?: TimedToken | null;
+};
+
+type ActiveSearchResult = {
+  blockIndex: number;
+  query: string;
 };
 
 function App() {
@@ -320,10 +327,16 @@ function ReaderView({
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
   const [colorMode, setColorMode] = useState<ColorMode>(() => storedColorMode());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<BookSearchResult[]>([]);
+  const [loadingSearch, setLoadingSearch] = useState(false);
+  const [activeSearchResult, setActiveSearchResult] = useState<ActiveSearchResult | null>(null);
   const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const wordPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const lastAudioSaveAtRef = useRef(0);
@@ -337,6 +350,7 @@ function ReaderView({
   const wordPreviewEndTimeRef = useRef<number | null>(null);
   const lastAutoScrollTokenRef = useRef<string | null>(null);
   const lastSelectionSeekKeyRef = useRef("");
+  const searchRequestRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -446,6 +460,47 @@ function ReaderView({
     }
     return tokens;
   }, [partAlignment]);
+  const trimmedSearchQuery = searchQuery.trim();
+
+  useEffect(() => {
+    if (!searchOpen) {
+      return;
+    }
+    window.requestAnimationFrame(() => searchInputRef.current?.focus());
+  }, [searchOpen]);
+
+  useEffect(() => {
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
+    if (!searchOpen || !reader || trimmedSearchQuery.length < 2) {
+      setSearchResults([]);
+      setLoadingSearch(false);
+      return;
+    }
+
+    setLoadingSearch(true);
+    const timeout = window.setTimeout(() => {
+      void searchBook(bookId, trimmedSearchQuery)
+        .then((results) => {
+          if (searchRequestRef.current === requestId) {
+            setSearchResults(results);
+          }
+        })
+        .catch((error) => {
+          if (searchRequestRef.current === requestId) {
+            toast.error(errorMessage(error, "Search failed."));
+            setSearchResults([]);
+          }
+        })
+        .finally(() => {
+          if (searchRequestRef.current === requestId) {
+            setLoadingSearch(false);
+          }
+        });
+    }, 250);
+
+    return () => window.clearTimeout(timeout);
+  }, [bookId, reader, searchOpen, trimmedSearchQuery]);
 
   const saveCurrentProgress = useCallback(
     (options: SaveProgressOptions = {}) => {
@@ -878,6 +933,39 @@ function ReaderView({
     }
   }, [chapterIndex]);
 
+  const toggleSearch = useCallback(() => {
+    const nextOpen = !searchOpen;
+    setSearchOpen(nextOpen);
+    if (nextOpen) {
+      setTocOpen(true);
+    }
+  }, [searchOpen]);
+
+  const selectSearchResult = useCallback(
+    (result: BookSearchResult) => {
+      const resultChapter = reader?.chapters.find((item) => item.chapter_index === result.chapter_index);
+      const resultPart = resultChapter?.parts.find(
+        (part) => result.block_index >= part.start_block_index && result.block_index <= part.end_block_index,
+      );
+      setActiveSearchResult({ blockIndex: result.block_index, query: trimmedSearchQuery });
+      selectChapter(result.chapter_index, resultPart?.part_index ?? 0, result.block_index);
+    },
+    [reader, selectChapter, trimmedSearchQuery],
+  );
+
+  useEffect(() => {
+    if (!activeSearchResult || !chapter) {
+      return;
+    }
+    if (!visibleBlocks.some((block) => block.block_index === activeSearchResult.blockIndex)) {
+      return;
+    }
+    visibleBlockRef.current = activeSearchResult.blockIndex;
+    scheduleScrollRestore(() => {
+      document.getElementById(blockDomId(activeSearchResult.blockIndex))?.scrollIntoView({ block: "center" });
+    });
+  }, [activeSearchResult, chapter, visibleBlocks]);
+
   const generateCurrentPartAudio = useCallback(
     async (regenerate: boolean) => {
       if (!activePart) {
@@ -1159,7 +1247,18 @@ function ReaderView({
                 </TooltipTrigger>
                 <TooltipContent>Library</TooltipContent>
               </Tooltip>
-              <Button variant="ghost" size="icon" onClick={() => setTocOpen((value) => !value)} aria-label="Toggle chapters">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  const nextOpen = !tocOpen;
+                  setTocOpen(nextOpen);
+                  if (!nextOpen) {
+                    setSearchOpen(false);
+                  }
+                }}
+                aria-label="Toggle chapters"
+              >
                 <MenuIcon />
               </Button>
             </div>
@@ -1167,7 +1266,17 @@ function ReaderView({
               <h1 className="truncate text-sm font-semibold">{reader?.title || "Opening book"}</h1>
               <p className="truncate text-xs text-muted-foreground">{activeChapter?.title || chapter?.title || "Chapter"}</p>
             </div>
-            <Badge variant="secondary">{reader ? `${Math.round(reader.progress.progress_percent)}%` : "..."}</Badge>
+            <div className="flex items-center justify-end gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant={searchOpen ? "secondary" : "ghost"} size="icon" onClick={toggleSearch} aria-label="Search book">
+                    <SearchIcon />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Search</TooltipContent>
+              </Tooltip>
+              <Badge variant="secondary">{reader ? `${Math.round(reader.progress.progress_percent)}%` : "..."}</Badge>
+            </div>
           </div>
         </header>
 
@@ -1176,6 +1285,24 @@ function ReaderView({
             <aside className="toc-panel">
               <ScrollArea className="h-[calc(100vh-4rem)]">
                 <div className="flex flex-col gap-2 p-4">
+                  {searchOpen ? (
+                    <SearchPanel
+                      inputRef={searchInputRef}
+                      query={searchQuery}
+                      results={searchResults}
+                      loading={loadingSearch}
+                      activeBlockIndex={activeSearchResult?.blockIndex ?? null}
+                      onQueryChange={(query) => {
+                        setSearchQuery(query);
+                        setActiveSearchResult(null);
+                      }}
+                      onSelect={selectSearchResult}
+                      onClose={() => {
+                        setSearchOpen(false);
+                        setActiveSearchResult(null);
+                      }}
+                    />
+                  ) : null}
                   <p className="px-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Chapters</p>
                   {reader?.chapters.map((item) => (
                     <div key={item.chapter_index} className="toc-group">
@@ -1295,6 +1422,7 @@ function ReaderView({
                           chapterIndex={chapterIndex}
                           colorMode={colorMode}
                           activeTokenKey={activeTokenKey}
+                          activeSearchResult={activeSearchResult}
                           markedTokens={markedTokens}
                           timedTokensByKey={timedTokensByKey}
                           onSeekToken={seekToTimedToken}
@@ -1491,6 +1619,93 @@ function PartAudioPlayer({
   );
 }
 
+function SearchPanel({
+  inputRef,
+  query,
+  results,
+  loading,
+  activeBlockIndex,
+  onQueryChange,
+  onSelect,
+  onClose,
+}: {
+  inputRef: RefObject<HTMLInputElement>;
+  query: string;
+  results: BookSearchResult[];
+  loading: boolean;
+  activeBlockIndex: number | null;
+  onQueryChange: (query: string) => void;
+  onSelect: (result: BookSearchResult) => void;
+  onClose: () => void;
+}) {
+  const trimmedQuery = query.trim();
+  const status = loading
+    ? "Searching"
+    : trimmedQuery.length < 2
+      ? "Type at least 2 characters"
+      : `${results.length} result${results.length === 1 ? "" : "s"}`;
+  return (
+    <section className="search-panel" aria-label="Book search" onKeyDown={(event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+      }
+    }}>
+      <div className="search-field">
+        <SearchIcon aria-hidden="true" />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="Search book"
+          aria-label="Search book"
+        />
+        {query ? (
+          <Button variant="ghost" size="icon" onClick={() => onQueryChange("")} aria-label="Clear search">
+            <XIcon />
+          </Button>
+        ) : null}
+      </div>
+      <div className="search-status">{status}</div>
+      {trimmedQuery.length >= 2 && !loading ? (
+        <div className="search-results">
+          {results.length ? (
+            results.map((result) => (
+              <button
+                key={`${result.chapter_index}-${result.block_index}`}
+                className={cn("search-result", activeBlockIndex === result.block_index && "active")}
+                type="button"
+                onClick={() => onSelect(result)}
+              >
+                <span className="search-result-title">{formatChapterTitle(result.chapter_title)}</span>
+                <span className="search-result-snippet">
+                  <HighlightedSnippet result={result} />
+                </span>
+                {result.match_count > 1 ? <span className="search-result-count">{result.match_count} matches</span> : null}
+              </button>
+            ))
+          ) : (
+            <div className="search-empty">No matches</div>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function HighlightedSnippet({ result }: { result: BookSearchResult }) {
+  const before = result.snippet.slice(0, result.match_start);
+  const match = result.snippet.slice(result.match_start, result.match_end);
+  const after = result.snippet.slice(result.match_end);
+  return (
+    <>
+      {before}
+      <mark>{match}</mark>
+      {after}
+    </>
+  );
+}
+
 function ReaderSkeleton() {
   return (
     <div className="flex flex-col gap-5">
@@ -1616,11 +1831,21 @@ function timedTokenAtTime(tokens: TimedToken[], time: number) {
   );
 }
 
+function caseInsensitiveTextRange(text: string, query: string) {
+  const needle = query.trim().toLocaleLowerCase();
+  if (needle.length < 2) {
+    return null;
+  }
+  const start = text.toLocaleLowerCase().indexOf(needle);
+  return start === -1 ? null : { start, end: start + needle.length };
+}
+
 function ReaderTokens({
   block,
   chapterIndex,
   colorMode,
   activeTokenKey,
+  activeSearchResult,
   markedTokens,
   timedTokensByKey,
   onSeekToken,
@@ -1631,6 +1856,7 @@ function ReaderTokens({
   chapterIndex: number;
   colorMode: ColorMode;
   activeTokenKey: string | null;
+  activeSearchResult: ActiveSearchResult | null;
   markedTokens: Set<string>;
   timedTokensByKey: Map<string, TimedToken>;
   onSeekToken: (blockIndex: number, tokenIndex: number) => void;
@@ -1640,6 +1866,11 @@ function ReaderTokens({
   if (!block.tokens.length) {
     return <>{block.text}</>;
   }
+  const searchRange =
+    activeSearchResult && activeSearchResult.blockIndex === block.block_index
+      ? caseInsensitiveTextRange(block.text, activeSearchResult.query)
+      : null;
+  let tokenOffset = 0;
   return (
     <>
       {block.tokens.map((token, index) => {
@@ -1647,6 +1878,10 @@ function ReaderTokens({
         const syncKey = timedTokenKey(block.block_index, index);
         const hasTiming = timedTokensByKey.has(syncKey);
         const colorLevel = colorMode === "frequency" ? token.frequency_level : token.cefr_level;
+        const tokenStart = tokenOffset;
+        const tokenEnd = tokenStart + token.text.length;
+        const isSearchHit = Boolean(searchRange && tokenEnd > searchRange.start && tokenStart < searchRange.end);
+        tokenOffset = tokenEnd;
         return (
           <span
             key={`${block.block_index}-${index}`}
@@ -1657,6 +1892,7 @@ function ReaderTokens({
               markedTokens.has(tokenKey) && "marked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
+              isSearchHit && "search-hit",
             )}
             data-cefr-level={token.cefr_level || undefined}
             data-frequency-level={token.frequency_level || undefined}
