@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use crate::cefr;
+use crate::cefr::{CefrLevel, ReaderToken};
 use crate::epub;
 use crate::epub::ExtractedBlockKind;
 use crate::models::{
@@ -105,11 +107,25 @@ CREATE TABLE IF NOT EXISTS audio_alignments (
     PRIMARY KEY(book_id, chapter_index, part_index, voice)
 );
 
+CREATE TABLE IF NOT EXISTS book_word_frequencies (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    word_key TEXT NOT NULL,
+    frequency_count INTEGER NOT NULL,
+    frequency_level TEXT NOT NULL,
+    PRIMARY KEY(book_id, word_key)
+);
+
+CREATE TABLE IF NOT EXISTS book_word_frequency_cache (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    generated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
 CREATE INDEX IF NOT EXISTS idx_book_chapters_book ON book_chapters(book_id, chapter_index);
 CREATE INDEX IF NOT EXISTS idx_chapter_blocks_book ON chapter_blocks(book_id, chapter_index, block_index);
 CREATE INDEX IF NOT EXISTS idx_reading_progress_last_read ON reading_progress(last_read_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audio_paragraphs_part ON audio_paragraphs(book_id, chapter_index, part_index, voice);
+CREATE INDEX IF NOT EXISTS idx_book_word_frequencies_book ON book_word_frequencies(book_id);
 "#;
 
 pub enum ImportOutcome {
@@ -369,6 +385,7 @@ pub fn import_book(
             ],
         )?;
     }
+    ensure_book_word_frequency_cache(&tx, book_id)?;
     tx.commit()?;
 
     Ok(ImportOutcome::Imported)
@@ -525,9 +542,10 @@ pub fn get_chapter(
             &mut blocks,
         )?;
     }
+    let frequencies = book_word_frequency_map(connection, book_id)?;
     let blocks = readable_chapter_blocks(&chapter.title, blocks)
         .into_iter()
-        .map(with_cefr_tokens)
+        .map(|block| with_reader_tokens(block, &frequencies))
         .collect();
 
     Ok(Some(ChapterPayload {
@@ -1338,11 +1356,223 @@ fn readable_chapter_blocks(chapter_title: &str, blocks: Vec<ChapterBlock>) -> Ve
         .collect()
 }
 
-fn with_cefr_tokens(mut block: ChapterBlock) -> ChapterBlock {
+#[derive(Clone, Copy, Debug)]
+struct WordFrequency {
+    count: usize,
+    level: CefrLevel,
+}
+
+fn with_reader_tokens(
+    mut block: ChapterBlock,
+    frequencies: &HashMap<String, WordFrequency>,
+) -> ChapterBlock {
     if block.kind == "paragraph" {
         block.tokens = cefr::tokenize_text(&block.text);
+        for token in &mut block.tokens {
+            let Some(key) = token_frequency_key(token) else {
+                continue;
+            };
+            if let Some(frequency) = frequencies.get(key) {
+                token.frequency_level = Some(frequency.level);
+                token.frequency_count = Some(frequency.count);
+            }
+        }
     }
     block
+}
+
+fn book_word_frequency_map(
+    connection: &Connection,
+    book_id: i64,
+) -> Result<HashMap<String, WordFrequency>> {
+    ensure_book_word_frequency_cache(connection, book_id)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT word_key, frequency_count, frequency_level
+        FROM book_word_frequencies
+        WHERE book_id = ?
+        "#,
+    )?;
+    let rows = statement.query_map(params![book_id], |row| {
+        let level_text: String = row.get(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            WordFrequency {
+                count: row.get::<_, i64>(1)?.max(0) as usize,
+                level: cefr_level_from_storage(&level_text).unwrap_or(CefrLevel::C2),
+            },
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+        .map_err(Into::into)
+}
+
+fn ensure_book_word_frequency_cache(connection: &Connection, book_id: i64) -> Result<()> {
+    let cache_built: Option<i64> = connection
+        .query_row(
+            "SELECT book_id FROM book_word_frequency_cache WHERE book_id = ?",
+            params![book_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if cache_built.is_some() {
+        return Ok(());
+    }
+
+    let entries = build_book_word_frequency_entries(connection, book_id)?;
+    connection.execute(
+        "DELETE FROM book_word_frequencies WHERE book_id = ?",
+        params![book_id],
+    )?;
+    for (word_key, frequency) in entries {
+        connection.execute(
+            r#"
+            INSERT OR REPLACE INTO book_word_frequencies (
+                book_id, word_key, frequency_count, frequency_level
+            ) VALUES (?, ?, ?, ?)
+            "#,
+            params![
+                book_id,
+                word_key,
+                frequency.count as i64,
+                cefr_level_to_storage(frequency.level)
+            ],
+        )?;
+    }
+    connection.execute(
+        r#"
+        INSERT OR REPLACE INTO book_word_frequency_cache (book_id, generated_at)
+        VALUES (?, ?)
+        "#,
+        params![book_id, now_iso()],
+    )?;
+    Ok(())
+}
+
+fn build_book_word_frequency_entries(
+    connection: &Connection,
+    book_id: i64,
+) -> Result<Vec<(String, WordFrequency)>> {
+    let raw_chapters = raw_chapter_summaries(connection, book_id)?;
+    let chapters = build_reader_chapters(
+        &raw_chapters,
+        &block_markers(connection, book_id, &raw_chapters)?,
+    )?;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for chapter in chapters
+        .into_iter()
+        .filter(|chapter| is_progress_chapter_title(&chapter.title))
+    {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT block_index, kind, text, asset_path, alt
+            FROM chapter_blocks
+            WHERE book_id = ?
+              AND kind = 'paragraph'
+              AND block_index BETWEEN ? AND ?
+            ORDER BY block_index
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![book_id, chapter.start_block_index, chapter.end_block_index],
+            |row| {
+                Ok(ChapterBlock {
+                    block_index: row.get(0)?,
+                    kind: row.get(1)?,
+                    text: row.get(2)?,
+                    asset_path: row.get(3)?,
+                    alt: row.get(4)?,
+                    tokens: Vec::new(),
+                })
+            },
+        )?;
+        let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for block in readable_chapter_blocks(&chapter.title, blocks) {
+            for token in cefr::tokenize_text(&block.text) {
+                if let Some(key) = token_frequency_key(&token) {
+                    *counts.entry(key.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    let mut ranked = counts.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|(left_word, left_count), (right_word, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_word.cmp(right_word))
+    });
+    let total = ranked.len();
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::with_capacity(total);
+    let mut index = 0;
+    while index < ranked.len() {
+        let count = ranked[index].1;
+        let level = frequency_level_for_rank(index, total);
+        let mut end = index + 1;
+        while end < ranked.len() && ranked[end].1 == count {
+            end += 1;
+        }
+        for (word_key, _) in &ranked[index..end] {
+            entries.push((
+                word_key.clone(),
+                WordFrequency {
+                    count,
+                    level,
+                },
+            ));
+        }
+        index = end;
+    }
+    Ok(entries)
+}
+
+fn token_frequency_key(token: &ReaderToken) -> Option<&str> {
+    if !token.root_text.is_empty() {
+        Some(&token.root_text)
+    } else if !token.normalized_text.is_empty() {
+        Some(&token.normalized_text)
+    } else {
+        None
+    }
+}
+
+fn frequency_level_for_rank(rank: usize, total: usize) -> CefrLevel {
+    match (rank * 6) / total.max(1) {
+        0 => CefrLevel::A1,
+        1 => CefrLevel::A2,
+        2 => CefrLevel::B1,
+        3 => CefrLevel::B2,
+        4 => CefrLevel::C1,
+        _ => CefrLevel::C2,
+    }
+}
+
+fn cefr_level_to_storage(level: CefrLevel) -> &'static str {
+    match level {
+        CefrLevel::A1 => "A1",
+        CefrLevel::A2 => "A2",
+        CefrLevel::B1 => "B1",
+        CefrLevel::B2 => "B2",
+        CefrLevel::C1 => "C1",
+        CefrLevel::C2 => "C2",
+    }
+}
+
+fn cefr_level_from_storage(value: &str) -> Option<CefrLevel> {
+    match value {
+        "A1" => Some(CefrLevel::A1),
+        "A2" => Some(CefrLevel::A2),
+        "B1" => Some(CefrLevel::B1),
+        "B2" => Some(CefrLevel::B2),
+        "C1" => Some(CefrLevel::C1),
+        "C2" => Some(CefrLevel::C2),
+        _ => None,
+    }
 }
 
 fn is_redundant_chapter_text(chapter_title: &str, text: &str) -> bool {
@@ -1670,6 +1900,69 @@ mod tests {
     }
 
     #[test]
+    fn caches_frequency_counts_for_progress_chapters_only() {
+        let connection = frequency_test_connection();
+
+        ensure_book_word_frequency_cache(&connection, 1).expect("cache");
+        let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
+
+        assert_eq!(frequencies.get("blue").map(|frequency| frequency.count), Some(4));
+        assert_eq!(frequencies.get("mid").map(|frequency| frequency.count), Some(2));
+        assert_eq!(frequencies.get("rare").map(|frequency| frequency.count), Some(1));
+        assert!(!frequencies.contains_key("copyrightonly"));
+        assert!(!frequencies.contains_key("headingonly"));
+    }
+
+    #[test]
+    fn assigns_more_frequent_words_to_earlier_levels() {
+        let connection = frequency_test_connection();
+        let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
+
+        assert_eq!(frequencies["blue"].level, CefrLevel::A1);
+        assert!(
+            frequency_level_rank(frequencies["blue"].level)
+                < frequency_level_rank(frequencies["rare"].level)
+        );
+    }
+
+    #[test]
+    fn annotates_chapter_tokens_from_cached_frequency_counts() {
+        let connection = frequency_test_connection();
+        let chapter = get_chapter(&connection, 1, 1)
+            .expect("chapter")
+            .expect("chapter");
+        let token = chapter.blocks[0]
+            .tokens
+            .iter()
+            .find(|token| token.normalized_text == "blue")
+            .expect("blue token");
+
+        assert_eq!(token.frequency_count, Some(4));
+        assert_eq!(token.frequency_level, Some(CefrLevel::A1));
+    }
+
+    #[test]
+    fn reuses_existing_frequency_cache_without_recounting() {
+        let connection = frequency_test_connection();
+        ensure_book_word_frequency_cache(&connection, 1).expect("cache");
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 1, 5, 'paragraph', 'blue newword', NULL, '')
+                "#,
+                [],
+            )
+            .expect("extra block");
+
+        ensure_book_word_frequency_cache(&connection, 1).expect("cached");
+        let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
+
+        assert_eq!(frequencies.get("blue").map(|frequency| frequency.count), Some(4));
+        assert!(!frequencies.contains_key("newword"));
+    }
+
+    #[test]
     fn virtual_dividers_split_after_their_previous_paragraph() {
         let parts = build_chapter_parts(
             10,
@@ -1986,6 +2279,68 @@ mod tests {
 
         let books = list_books(&connection).expect("books");
         assert_eq!(books[0].progress_percent, 50.0);
+    }
+
+    fn frequency_test_connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash-frequency', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        for (chapter_index, title, source_href, start_block_index, end_block_index) in [
+            (0, "Copyright", "copyright.xhtml", 0, 0),
+            (1, "0 Headingonly", "chapter000.xhtml", 1, 3),
+            (2, "Translation Notes", "notes.xhtml", 4, 4),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO book_chapters (
+                        book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                    "#,
+                    params![chapter_index, title, source_href, start_block_index, end_block_index],
+                )
+                .expect("chapter");
+        }
+        for (chapter_index, block_index, text) in [
+            (0, 0, "copyrightonly copyrightonly"),
+            (1, 1, "0 Headingonly"),
+            (1, 2, "blue blue blue mid rare"),
+            (1, 3, "blue mid"),
+            (2, 4, "notesonly notesonly notesonly"),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                    VALUES (1, ?, ?, 'paragraph', ?, NULL, '')
+                    "#,
+                    params![chapter_index, block_index, text],
+                )
+                .expect("block");
+        }
+        connection
+    }
+
+    fn frequency_level_rank(level: CefrLevel) -> u8 {
+        match level {
+            CefrLevel::A1 => 1,
+            CefrLevel::A2 => 2,
+            CefrLevel::B1 => 3,
+            CefrLevel::B2 => 4,
+            CefrLevel::C1 => 5,
+            CefrLevel::C2 => 6,
+        }
     }
 
     fn table_columns(connection: &Connection, table: &str) -> Vec<String> {

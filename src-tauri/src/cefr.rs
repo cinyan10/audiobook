@@ -51,6 +51,8 @@ pub struct ReaderToken {
     pub normalized_text: String,
     pub root_text: String,
     pub cefr_level: Option<CefrLevel>,
+    pub frequency_level: Option<CefrLevel>,
+    pub frequency_count: Option<usize>,
 }
 
 pub fn tokenize_text(text: &str) -> Vec<ReaderToken> {
@@ -108,6 +110,8 @@ fn push_token(tokens: &mut Vec<ReaderToken>, text: &str) {
         normalized_text,
         root_text,
         cefr_level,
+        frequency_level: None,
+        frequency_count: None,
     });
 }
 

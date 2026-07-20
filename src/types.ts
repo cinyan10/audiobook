@@ -66,6 +66,8 @@ export type ReaderToken = {
   normalized_text: string;
   root_text: string;
   cefr_level: CEFRLevel | null;
+  frequency_level: CEFRLevel | null;
+  frequency_count: number | null;
 };
 
 export type CEFRLevel = "A1" | "A2" | "B1" | "B2" | "C1" | "C2";

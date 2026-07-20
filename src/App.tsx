@@ -72,6 +72,8 @@ type PendingResume = {
   progress: ReadingProgress;
 };
 
+type ColorMode = "frequency" | "cefr";
+
 type SaveProgressOptions = {
   immediate?: boolean;
   blockIndex?: number;
@@ -317,6 +319,7 @@ function ReaderView({
   const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
   const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
+  const [colorMode, setColorMode] = useState<ColorMode>(() => storedColorMode());
   const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -404,6 +407,10 @@ function ReaderView({
       setMarkedTokens(new Set());
     }
   }, [bookId]);
+
+  useEffect(() => {
+    window.localStorage.setItem(colorModeStorageKey(), colorMode);
+  }, [colorMode]);
 
   const activeChapter = useMemo(
     () => reader?.chapters.find((item) => item.chapter_index === chapterIndex),
@@ -1211,6 +1218,19 @@ function ReaderView({
                   <div className="part-stats" aria-label="Part statistics">
                     {activePart && activeChapter && activeChapter.parts.length > 1 ? <span className="part-label">{activePart.title}</span> : null}
                     <span>{partWordCount.toLocaleString()} words</span>
+                    <div className="color-mode-toggle" aria-label="Word color mode">
+                      {(["frequency", "cefr"] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          className={cn(colorMode === mode && "active")}
+                          type="button"
+                          onClick={() => setColorMode(mode)}
+                          aria-pressed={colorMode === mode}
+                        >
+                          {mode === "frequency" ? "Frequency" : "CEFR"}
+                        </button>
+                      ))}
+                    </div>
                     {partAudio ? (
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
@@ -1273,6 +1293,7 @@ function ReaderView({
                         <ReaderTokens
                           block={block}
                           chapterIndex={chapterIndex}
+                          colorMode={colorMode}
                           activeTokenKey={activeTokenKey}
                           markedTokens={markedTokens}
                           timedTokensByKey={timedTokensByKey}
@@ -1598,6 +1619,7 @@ function timedTokenAtTime(tokens: TimedToken[], time: number) {
 function ReaderTokens({
   block,
   chapterIndex,
+  colorMode,
   activeTokenKey,
   markedTokens,
   timedTokensByKey,
@@ -1607,6 +1629,7 @@ function ReaderTokens({
 }: {
   block: ChapterPayload["blocks"][number];
   chapterIndex: number;
+  colorMode: ColorMode;
   activeTokenKey: string | null;
   markedTokens: Set<string>;
   timedTokensByKey: Map<string, TimedToken>;
@@ -1623,18 +1646,21 @@ function ReaderTokens({
         const tokenKey = markedTokenKey(chapterIndex, block.block_index, index);
         const syncKey = timedTokenKey(block.block_index, index);
         const hasTiming = timedTokensByKey.has(syncKey);
+        const colorLevel = colorMode === "frequency" ? token.frequency_level : token.cefr_level;
         return (
           <span
             key={`${block.block_index}-${index}`}
             ref={(node) => onTokenRef(syncKey, node)}
             className={cn(
               "reader-token",
-              token.cefr_level && `level-${token.cefr_level.toLowerCase()}`,
+              colorLevel && `level-${colorLevel.toLowerCase()}`,
               markedTokens.has(tokenKey) && "marked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
             )}
             data-cefr-level={token.cefr_level || undefined}
+            data-frequency-level={token.frequency_level || undefined}
+            data-frequency-count={token.frequency_count || undefined}
             data-root-text={token.root_text || undefined}
             onClick={() => {
               if (hasTiming) {
@@ -1664,6 +1690,15 @@ function timedTokenKey(blockIndex: number, tokenIndex: number) {
 
 function markedTokensStorageKey(bookId: number) {
   return `readalong:marked-tokens:${bookId}`;
+}
+
+function colorModeStorageKey() {
+  return "readalong:color-mode";
+}
+
+function storedColorMode(): ColorMode {
+  const stored = window.localStorage.getItem(colorModeStorageKey());
+  return stored === "cefr" ? "cefr" : "frequency";
 }
 
 function shouldIgnorePlaybackShortcut(target: EventTarget | null) {
