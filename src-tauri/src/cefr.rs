@@ -7,10 +7,19 @@ use serde::Serialize;
 const CEFRJ_VOCABULARY: &str = include_str!("../assets/cefr/cefrj-vocabulary-profile-1.5.csv");
 const OCTANOVE_C1C2_VOCABULARY: &str =
     include_str!("../assets/cefr/octanove-vocabulary-profile-c1c2-1.0.csv");
-const OXFORD_3000_A1: &str = include_str!("../assets/cefr/oxford-3000-a1.txt");
+const OXFORD_3000_5000_CEFR: &str = include_str!("../assets/cefr/oxford-3000-5000-cefr.csv");
 
-static PROFILE: LazyLock<HashMap<String, CefrLevel>> = LazyLock::new(load_profile);
+static OXFORD_PROFILE: LazyLock<HashMap<String, CefrLevel>> =
+    LazyLock::new(|| load_profile(CefrProfileSource::Oxford));
+static LEGACY_OLP_PROFILE: LazyLock<HashMap<String, CefrLevel>> =
+    LazyLock::new(|| load_profile(CefrProfileSource::LegacyOlp));
 static OXFORD_3000_A1_WORDS: LazyLock<HashSet<String>> = LazyLock::new(load_oxford_3000_a1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CefrProfileSource {
+    Oxford,
+    LegacyOlp,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum CefrLevel {
@@ -82,13 +91,17 @@ pub fn tokenize_text(text: &str) -> Vec<ReaderToken> {
 }
 
 pub fn lookup_level(word: &str) -> Option<CefrLevel> {
+    lookup_level_with_source(word, CefrProfileSource::Oxford)
+}
+
+pub fn lookup_level_with_source(word: &str, source: CefrProfileSource) -> Option<CefrLevel> {
     let normalized = normalize_word_text(word);
     if normalized.is_empty() {
         return None;
     }
 
     for candidate in lookup_candidates(&normalized) {
-        if let Some(level) = PROFILE.get(&candidate) {
+        if let Some(level) = profile(source).get(&candidate) {
             return Some(*level);
         }
     }
@@ -120,7 +133,7 @@ pub fn frequency_key(word: &str) -> Option<String> {
     candidates
         .into_iter()
         .filter_map(|candidate| {
-            PROFILE
+            profile(CefrProfileSource::Oxford)
                 .get(&candidate)
                 .map(|level| (candidate, level.rank()))
         })
@@ -157,18 +170,29 @@ fn push_token(tokens: &mut Vec<ReaderToken>, text: &str) {
     });
 }
 
-fn load_profile() -> HashMap<String, CefrLevel> {
+fn profile(source: CefrProfileSource) -> &'static HashMap<String, CefrLevel> {
+    match source {
+        CefrProfileSource::Oxford => &OXFORD_PROFILE,
+        CefrProfileSource::LegacyOlp => &LEGACY_OLP_PROFILE,
+    }
+}
+
+fn load_profile(source: CefrProfileSource) -> HashMap<String, CefrLevel> {
     let mut profile = HashMap::new();
-    load_profile_csv(&mut profile, CEFRJ_VOCABULARY);
-    load_profile_csv(&mut profile, OCTANOVE_C1C2_VOCABULARY);
+    match source {
+        CefrProfileSource::Oxford => load_profile_csv(&mut profile, OXFORD_3000_5000_CEFR),
+        CefrProfileSource::LegacyOlp => {
+            load_profile_csv(&mut profile, CEFRJ_VOCABULARY);
+            load_profile_csv(&mut profile, OCTANOVE_C1C2_VOCABULARY);
+        }
+    }
     profile
 }
 
 fn load_oxford_3000_a1() -> HashSet<String> {
-    OXFORD_3000_A1
-        .lines()
-        .map(normalize_word_text)
-        .filter(|word| !word.is_empty())
+    profile(CefrProfileSource::Oxford)
+        .iter()
+        .filter_map(|(word, level)| (*level == CefrLevel::A1).then_some(word.clone()))
         .collect()
 }
 
@@ -421,7 +445,10 @@ fn irregular_root(word: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_oxford_3000_a1_word, lookup_level, tokenize_text, CefrLevel};
+    use super::{
+        is_oxford_3000_a1_word, lookup_level, lookup_level_with_source, tokenize_text, CefrLevel,
+        CefrProfileSource,
+    };
 
     #[test]
     fn looks_up_direct_words() {
@@ -431,6 +458,15 @@ mod tests {
     #[test]
     fn looks_up_slash_variants() {
         assert_eq!(lookup_level("analyse"), Some(CefrLevel::B1));
+    }
+
+    #[test]
+    fn preserves_legacy_olp_profile() {
+        assert_eq!(lookup_level("apparently"), Some(CefrLevel::B2));
+        assert_eq!(
+            lookup_level_with_source("apparently", CefrProfileSource::LegacyOlp),
+            Some(CefrLevel::A2)
+        );
     }
 
     #[test]
@@ -478,7 +514,7 @@ mod tests {
         assert_eq!(super::frequency_key("works").as_deref(), Some("work"));
         assert_eq!(super::frequency_key("entered").as_deref(), Some("enter"));
         assert_eq!(super::frequency_key("entering").as_deref(), Some("enter"));
-        assert_eq!(super::frequency_key("engaged").as_deref(), Some("engage"));
+        assert_eq!(super::frequency_key("engaged").as_deref(), Some("engaged"));
         assert_eq!(super::frequency_key("engaging").as_deref(), Some("engage"));
     }
 
