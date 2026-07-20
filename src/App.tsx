@@ -15,7 +15,7 @@ import {
   ZoomInIcon,
   ZoomOutIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { toast } from "sonner";
 
 import {
@@ -1271,10 +1271,6 @@ function ReaderView({
           error: null,
           result,
         });
-        if (result.audio_url && dictionaryAudioRef.current) {
-          dictionaryAudioRef.current.src = result.audio_url;
-          void dictionaryAudioRef.current.play().catch(() => undefined);
-        }
       })
       .catch((error) => {
         if (lookupRequestRef.current !== requestId) {
@@ -1627,7 +1623,22 @@ function ReaderView({
             onMark={markContextMenuWord}
           />
         ) : null}
-        {lookupDialog ? <LookupDialog lookup={lookupDialog} onClose={() => setLookupDialog(null)} /> : null}
+        {lookupDialog ? (
+          <LookupDialog
+            lookup={lookupDialog}
+            onClose={() => setLookupDialog(null)}
+            onMove={(x, y) => setLookupDialog((current) => (current ? { ...current, x, y } : current))}
+            onPlayPronunciation={(audioUrl) => {
+              const audio = dictionaryAudioRef.current;
+              if (!audio) {
+                return;
+              }
+              audio.pause();
+              audio.src = audioUrl;
+              void audio.play().catch(() => undefined);
+            }}
+          />
+        ) : null}
         {dialogImage ? (
           <ImageDialog
             image={dialogImage}
@@ -1713,20 +1724,66 @@ function WordContextMenu({
   );
 }
 
-function LookupDialog({ lookup, onClose }: { lookup: LookupDialogState; onClose: () => void }) {
+function LookupDialog({
+  lookup,
+  onClose,
+  onMove,
+  onPlayPronunciation,
+}: {
+  lookup: LookupDialogState;
+  onClose: () => void;
+  onMove: (x: number, y: number) => void;
+  onPlayPronunciation: (audioUrl: string) => void;
+}) {
   const result = lookup.result;
   const choice = result?.context_definition;
   const examples = choice?.examples ?? [];
   const displayWord = result?.selected_word || lookup.word;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const startDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Element && target.closest("button")) {
+      return;
+    }
+    event.preventDefault();
+    const dialog = dialogRef.current;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = lookup.x;
+    const startTop = lookup.y;
+    const width = dialog?.offsetWidth ?? 380;
+    const height = dialog?.offsetHeight ?? 260;
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const maxTop = Math.max(72, window.innerHeight - height - 8);
+
+    const move = (moveEvent: MouseEvent) => {
+      onMove(
+        clampNumber(startLeft + moveEvent.clientX - startX, 8, maxLeft),
+        clampNumber(startTop + moveEvent.clientY - startY, 72, maxTop),
+      );
+    };
+    const stop = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+  };
+
   return (
     <div
+      ref={dialogRef}
       className="lookup-dialog"
       style={{ left: lookup.x, top: lookup.y }}
       role="dialog"
       aria-label={`${displayWord} lookup`}
       onMouseDown={(event) => event.stopPropagation()}
     >
-      <div className="lookup-toolbar">
+      <div className="lookup-toolbar" onMouseDown={startDrag}>
         <div className="lookup-title">
           <strong>{displayWord}</strong>
           <div className="lookup-badges">
@@ -1751,14 +1808,15 @@ function LookupDialog({ lookup, onClose }: { lookup: LookupDialogState; onClose:
 
       {result ? (
         <div className="lookup-content">
-          {result.phonetics.length || result.audio_url ? (
+          {result.phonetics.length ? (
             <div className="lookup-pronunciation">
-              {result.phonetics.length ? <span>{result.phonetics.join("  ")}</span> : null}
               {result.audio_url ? (
-                <audio controls src={result.audio_url} aria-label={`${displayWord} pronunciation`}>
-                  <track kind="captions" />
-                </audio>
-              ) : null}
+                <button type="button" className="lookup-phonetic-button" onClick={() => onPlayPronunciation(result.audio_url)}>
+                  {result.phonetics.join("  ")}
+                </button>
+              ) : (
+                <span>{result.phonetics.join("  ")}</span>
+              )}
             </div>
           ) : null}
 

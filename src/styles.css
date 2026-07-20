@@ -859,6 +859,12 @@ svg {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
+  cursor: grab;
+  user-select: none;
+}
+
+.lookup-toolbar:active {
+  cursor: grabbing;
 }
 
 .lookup-title {
@@ -897,9 +903,23 @@ svg {
   font-weight: 700;
 }
 
-.lookup-pronunciation audio {
-  width: 100%;
-  max-height: 2.35rem;
+.lookup-phonetic-button {
+  width: fit-content;
+  border: 0;
+  border-radius: calc(var(--radius) - 0.6rem);
+  background: transparent;
+  padding: 0.12rem 0.2rem;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lookup-phonetic-button:hover,
+.lookup-phonetic-button:focus-visible {
+  background: oklch(var(--accent));
+  color: oklch(var(--accent-foreground));
+  outline: 0;
 }
 
 .lookup-section {
@@ -995,12 +1015,6 @@ svg {
 
   .reader-audio {
     bottom: 0.75rem;
-  }
-
-  .lookup-dialog {
-    left: 0.75rem !important;
-    right: 0.75rem;
-    width: auto;
   }
 
   .audio-timeline span:last-child {

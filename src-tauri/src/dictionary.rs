@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -347,13 +349,10 @@ async fn choose_definition(
     context: &str,
     definitions: &[DictionaryDefinition],
 ) -> AiDefinitionChoice {
-    let Some(api_key) = std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(api_key) = env_value("DEEPSEEK_API_KEY") else {
         return fallback_choice(definitions);
     };
-    let model = std::env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+    let model = env_value("DEEPSEEK_MODEL").unwrap_or_else(|| "deepseek-v4-flash".to_string());
     let candidates = definitions
         .iter()
         .map(|definition| {
@@ -705,6 +704,39 @@ fn extract_json(text: &str) -> String {
     }
 }
 
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| dotenv_value(key))
+}
+
+fn dotenv_value(key: &str) -> Option<String> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dotenv_path = manifest_dir.parent()?.join(".env");
+    let contents = fs::read_to_string(dotenv_path).ok()?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((line_key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if line_key.trim() == key {
+            return Some(trim_env_value(value));
+        }
+    }
+    None
+}
+
+fn trim_env_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'')
+        .to_string()
+}
+
 fn unique(values: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     values
@@ -755,6 +787,13 @@ mod tests {
     }
 
     #[test]
+    fn trims_dotenv_values() {
+        assert_eq!(trim_env_value(" value "), "value");
+        assert_eq!(trim_env_value(" \"value\" "), "value");
+        assert_eq!(trim_env_value(" 'value' "), "value");
+    }
+
+    #[test]
     fn collects_same_headword_candidate_urls() {
         let urls = candidate_urls(
             HTML,
@@ -801,6 +840,32 @@ mod tests {
 
         assert_eq!(lookup.word, "resist");
         assert!(!lookup.definitions.is_empty());
+    }
+
+    #[test]
+    #[ignore = "hits Oxford Learner's Dictionary and DeepSeek"]
+    fn live_lookup_uses_deepseek_when_configured() {
+        if env_value("DEEPSEEK_API_KEY").is_none() {
+            eprintln!("DEEPSEEK_API_KEY is not configured; skipping live DeepSeek check.");
+            return;
+        }
+
+        let lookup = tauri::async_runtime::block_on(lookup_word(
+            "resisting".to_string(),
+            "resisting\n\nShe was resisting the order.".to_string(),
+            "".to_string(),
+            "".to_string(),
+        ))
+        .expect("live lookup");
+
+        assert!(
+            !lookup.simple_meaning.trim().is_empty(),
+            "DeepSeek should provide or preserve a simple meaning"
+        );
+        assert!(
+            !lookup.in_context_meaning.trim().is_empty(),
+            "DeepSeek should provide an in-context meaning"
+        );
     }
 
     #[test]
