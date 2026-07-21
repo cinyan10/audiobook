@@ -304,21 +304,23 @@ pub async fn generate_part_audio(
     if part_index == 0 {
         let title = chapter_title.trim();
         if !title.is_empty() {
+            let tts_text = tts_pronunciation_text(title);
             let block_index = title_audio_block_index(chapter_index);
-            paragraph_hashes.insert(block_index, hash_text(title));
+            paragraph_hashes.insert(block_index, hash_text(&tts_text));
             request_paragraphs.push(GeneratorRequestParagraph {
                 block_index,
-                text: title.to_string(),
+                text: tts_text,
                 output_path: path_to_string(output_dir.join("chapter-title.wav")),
             });
         }
     }
     request_paragraphs.extend(paragraphs.iter().map(|paragraph| {
-        let text_hash = hash_text(&paragraph.text);
+        let tts_text = tts_pronunciation_text(&paragraph.text);
+        let text_hash = hash_text(&tts_text);
         paragraph_hashes.insert(paragraph.block_index, text_hash);
         GeneratorRequestParagraph {
             block_index: paragraph.block_index,
-            text: paragraph.text.clone(),
+            text: tts_text,
             output_path: path_to_string(
                 output_dir.join(format!("block-{}.wav", paragraph.block_index)),
             ),
@@ -733,18 +735,42 @@ fn cached_audio_matches_current_format(
     part_index: i64,
     voice: &str,
 ) -> anyhow::Result<bool> {
+    let paragraphs = db::part_audio_paragraphs(connection, book_id, chapter_index, part_index)?;
+    let existing =
+        db::generated_audio_paragraphs(connection, book_id, chapter_index, part_index, voice)?;
+    let existing_by_block = existing
+        .iter()
+        .map(|paragraph| (paragraph.block_index, paragraph))
+        .collect::<HashMap<_, _>>();
+
+    for paragraph in paragraphs {
+        let Some(generated) = existing_by_block.get(&paragraph.block_index) else {
+            return Ok(false);
+        };
+        if !Path::new(&generated.audio_path).exists()
+            || generated.text_hash != hash_text(&tts_pronunciation_text(&paragraph.text))
+        {
+            return Ok(false);
+        }
+    }
+
     if part_index != 0 {
         return Ok(true);
     }
 
-    Ok(
-        db::generated_audio_paragraphs(connection, book_id, chapter_index, part_index, voice)?
-            .into_iter()
-            .any(|paragraph| {
-                paragraph.block_index == title_audio_block_index(chapter_index)
-                    && Path::new(&paragraph.audio_path).exists()
-            }),
-    )
+    let chapter_title =
+        db::reader_chapter_title(connection, book_id, chapter_index)?.unwrap_or_default();
+    let title = chapter_title.trim();
+    if title.is_empty() {
+        return Ok(true);
+    }
+    let title_block_index = title_audio_block_index(chapter_index);
+    Ok(existing_by_block
+        .get(&title_block_index)
+        .is_some_and(|paragraph| {
+            Path::new(&paragraph.audio_path).exists()
+                && paragraph.text_hash == hash_text(&tts_pronunciation_text(title))
+        }))
 }
 
 fn leading_audio_offset_seconds(generated_paragraphs: &[GeneratedAudioParagraph]) -> f64 {
@@ -912,6 +938,68 @@ fn hash_text(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+fn tts_pronunciation_text(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if index + 2 < chars.len()
+            && chars[index].is_ascii_alphabetic()
+            && chars[index + 1] == '-'
+            && chars[index].eq_ignore_ascii_case(&chars[index + 2])
+            && is_stutter_boundary(chars.get(index.wrapping_sub(1)).copied(), index)
+        {
+            if let Some(prefix) = stutter_pronunciation_prefix(chars[index]) {
+                out.push_str(&prefix);
+                out.push('-');
+                index += 2;
+                continue;
+            }
+        }
+
+        out.push(chars[index]);
+        index += 1;
+    }
+
+    out
+}
+
+fn is_stutter_boundary(previous: Option<char>, index: usize) -> bool {
+    index == 0 || previous.is_none_or(|character| !character.is_ascii_alphabetic())
+}
+
+fn stutter_pronunciation_prefix(character: char) -> Option<String> {
+    let prefix = match character.to_ascii_lowercase() {
+        'b' => "buh",
+        'c' | 'k' | 'q' => "kuh",
+        'd' => "duh",
+        'f' => "fuh",
+        'g' => "guh",
+        'h' => "huh",
+        'j' => "juh",
+        'l' => "luh",
+        'm' => "muh",
+        'n' => "nuh",
+        'p' => "puh",
+        'r' => "ruh",
+        's' => "suh",
+        't' => "tuh",
+        'v' => "vuh",
+        'w' => "wuh",
+        'y' => "yuh",
+        'z' => "zuh",
+        _ => return None,
+    };
+    if character.is_ascii_uppercase() {
+        let mut chars = prefix.chars();
+        let first = chars.next()?.to_ascii_uppercase();
+        Some(format!("{first}{}", chars.as_str()))
+    } else {
+        Some(prefix.to_string())
+    }
+}
+
 fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -954,5 +1042,27 @@ mod tests {
         }];
 
         assert_eq!(leading_audio_offset_seconds(&paragraphs), 0.0);
+    }
+
+    #[test]
+    fn tts_text_phoneticizes_single_letter_stutters() {
+        assert_eq!(
+            tts_pronunciation_text("L-look at this."),
+            "Luh-look at this."
+        );
+        assert_eq!(
+            tts_pronunciation_text("\"W-wait,\" she said."),
+            "\"Wuh-wait,\" she said."
+        );
+        assert_eq!(tts_pronunciation_text("I s-said no."), "I suh-said no.");
+    }
+
+    #[test]
+    fn tts_text_keeps_non_stutter_hyphen_words() {
+        assert_eq!(
+            tts_pronunciation_text("A-team and X-ray."),
+            "A-team and X-ray."
+        );
+        assert_eq!(tts_pronunciation_text("well-worn words"), "well-worn words");
     }
 }
