@@ -579,6 +579,22 @@ pub fn get_chapter(
     }))
 }
 
+pub fn reader_chapter_title(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+) -> Result<Option<String>> {
+    let raw_chapters = raw_chapter_summaries(connection, book_id)?;
+    let chapters = build_reader_chapters(
+        &raw_chapters,
+        &block_markers(connection, book_id, &raw_chapters)?,
+    )?;
+    Ok(chapters
+        .into_iter()
+        .find(|item| item.chapter_index == chapter_index)
+        .map(|chapter| chapter.title))
+}
+
 pub fn search_book(
     connection: &Connection,
     book_id: i64,

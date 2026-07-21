@@ -20,6 +20,7 @@ use crate::AppState;
 const DEFAULT_AUDIO_VOICE: &str = "bf_emma";
 const DEFAULT_AUDIO_SPEED: f64 = 0.95;
 const PARAGRAPH_SILENCE_SECONDS: f64 = 0.22;
+const TITLE_AUDIO_BLOCK_BASE: i64 = -1_000_000_000_000;
 
 #[tauri::command]
 pub fn list_books(state: State<'_, AppState>) -> Result<Vec<BookSummary>, String> {
@@ -255,18 +256,32 @@ pub async fn generate_part_audio(
             .map_err(|error| error.to_string())?
             .filter(|payload| Path::new(&payload.audio_path).exists())
             {
-                return Ok(audio);
+                if cached_audio_matches_current_format(
+                    &connection,
+                    book_id,
+                    chapter_index,
+                    part_index,
+                    &audio.voice,
+                )
+                .map_err(|error| error.to_string())?
+                {
+                    return Ok(audio);
+                }
             }
         }
     }
 
-    let paragraphs = {
+    let (chapter_title, paragraphs) = {
         let connection = state
             .db
             .lock()
             .map_err(|_| "Database lock failed.".to_string())?;
-        db::part_audio_paragraphs(&connection, book_id, chapter_index, part_index)
+        let chapter_title = db::reader_chapter_title(&connection, book_id, chapter_index)
             .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Chapter not found.".to_string())?;
+        let paragraphs = db::part_audio_paragraphs(&connection, book_id, chapter_index, part_index)
+            .map_err(|error| error.to_string())?;
+        (chapter_title, paragraphs)
     };
     if paragraphs.is_empty() {
         return Err("No paragraphs found for this part.".to_string());
@@ -285,20 +300,30 @@ pub async fn generate_part_audio(
     let response_path = output_dir.join("response.json");
     let part_output_path = output_dir.join("part.wav");
     let mut paragraph_hashes = HashMap::new();
-    let request_paragraphs = paragraphs
-        .iter()
-        .map(|paragraph| {
-            let text_hash = hash_text(&paragraph.text);
-            paragraph_hashes.insert(paragraph.block_index, text_hash);
-            GeneratorRequestParagraph {
-                block_index: paragraph.block_index,
-                text: paragraph.text.clone(),
-                output_path: path_to_string(
-                    output_dir.join(format!("block-{}.wav", paragraph.block_index)),
-                ),
-            }
-        })
-        .collect();
+    let mut request_paragraphs = Vec::new();
+    if part_index == 0 {
+        let title = chapter_title.trim();
+        if !title.is_empty() {
+            let block_index = title_audio_block_index(chapter_index);
+            paragraph_hashes.insert(block_index, hash_text(title));
+            request_paragraphs.push(GeneratorRequestParagraph {
+                block_index,
+                text: title.to_string(),
+                output_path: path_to_string(output_dir.join("chapter-title.wav")),
+            });
+        }
+    }
+    request_paragraphs.extend(paragraphs.iter().map(|paragraph| {
+        let text_hash = hash_text(&paragraph.text);
+        paragraph_hashes.insert(paragraph.block_index, text_hash);
+        GeneratorRequestParagraph {
+            block_index: paragraph.block_index,
+            text: paragraph.text.clone(),
+            output_path: path_to_string(
+                output_dir.join(format!("block-{}.wav", paragraph.block_index)),
+            ),
+        }
+    }));
 
     let request = GeneratorRequest {
         voice: DEFAULT_AUDIO_VOICE.to_string(),
@@ -657,7 +682,7 @@ fn build_alignment_request(
         .iter()
         .map(|paragraph| (paragraph.block_index, paragraph))
         .collect::<HashMap<_, _>>();
-    let mut offset_seconds = 0.0;
+    let mut offset_seconds = leading_audio_offset_seconds(generated_paragraphs);
     let mut request_paragraphs = Vec::new();
 
     for paragraph in paragraphs {
@@ -699,6 +724,43 @@ fn build_alignment_request(
         duration_seconds,
         paragraphs: request_paragraphs,
     })
+}
+
+fn cached_audio_matches_current_format(
+    connection: &rusqlite::Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    voice: &str,
+) -> anyhow::Result<bool> {
+    if part_index != 0 {
+        return Ok(true);
+    }
+
+    Ok(
+        db::generated_audio_paragraphs(connection, book_id, chapter_index, part_index, voice)?
+            .into_iter()
+            .any(|paragraph| {
+                paragraph.block_index == title_audio_block_index(chapter_index)
+                    && Path::new(&paragraph.audio_path).exists()
+            }),
+    )
+}
+
+fn leading_audio_offset_seconds(generated_paragraphs: &[GeneratedAudioParagraph]) -> f64 {
+    generated_paragraphs
+        .first()
+        .filter(|paragraph| is_title_audio_block_index(paragraph.block_index))
+        .map(|paragraph| paragraph.duration_seconds + PARAGRAPH_SILENCE_SECONDS)
+        .unwrap_or(0.0)
+}
+
+fn title_audio_block_index(chapter_index: i64) -> i64 {
+    TITLE_AUDIO_BLOCK_BASE.saturating_sub(chapter_index.max(0))
+}
+
+fn is_title_audio_block_index(block_index: i64) -> bool {
+    block_index <= TITLE_AUDIO_BLOCK_BASE
 }
 
 fn run_alignment_worker(request_path: &Path, response_path: &Path) -> Result<(), String> {
@@ -856,4 +918,41 @@ fn path_to_string(path: PathBuf) -> String {
 
 fn round_seconds(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_audio_segment_offsets_body_alignment() {
+        let paragraphs = vec![
+            GeneratedAudioParagraph {
+                block_index: title_audio_block_index(4),
+                text_hash: String::new(),
+                audio_path: String::new(),
+                duration_seconds: 1.5,
+            },
+            GeneratedAudioParagraph {
+                block_index: 42,
+                text_hash: String::new(),
+                audio_path: String::new(),
+                duration_seconds: 3.0,
+            },
+        ];
+
+        assert_eq!(leading_audio_offset_seconds(&paragraphs), 1.72);
+    }
+
+    #[test]
+    fn body_audio_without_title_starts_alignment_at_zero() {
+        let paragraphs = vec![GeneratedAudioParagraph {
+            block_index: 42,
+            text_hash: String::new(),
+            audio_path: String::new(),
+            duration_seconds: 3.0,
+        }];
+
+        assert_eq!(leading_audio_offset_seconds(&paragraphs), 0.0);
+    }
 }
