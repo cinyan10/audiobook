@@ -9,6 +9,7 @@ import type {
   PartAlignmentPayload,
   PartAudioPayload,
   ReaderPayload,
+  WordlistEntry,
 } from "@/types";
 
 export function listBooks() {
@@ -38,6 +39,42 @@ export function lookupWord(word: string, context: string, cefrLevel: string, roo
     cefrLevel,
     rootWord,
   });
+}
+
+export function listWordlistEntries() {
+  return invoke<WordlistEntry[]>("list_wordlist_entries");
+}
+
+export function listBookWordlistEntries(bookId: number) {
+  return invoke<WordlistEntry[]>("list_book_wordlist_entries", { bookId });
+}
+
+export type AddWordlistEntryInput = {
+  bookId: number;
+  chapterIndex: number;
+  blockIndex: number;
+  tokenIndex: number;
+  word: string;
+  rootWord: string;
+  context: string;
+  cefrLevel: string;
+};
+
+export function addWordlistEntry(input: AddWordlistEntryInput) {
+  return invoke<WordlistEntry>("add_wordlist_entry", {
+    bookId: input.bookId,
+    chapterIndex: input.chapterIndex,
+    blockIndex: input.blockIndex,
+    tokenIndex: input.tokenIndex,
+    word: input.word,
+    rootWord: input.rootWord,
+    context: input.context,
+    cefrLevel: input.cefrLevel,
+  });
+}
+
+export function deleteWordlistEntry(rootWord: string) {
+  return invoke<boolean>("delete_wordlist_entry", { rootWord });
 }
 
 export function getPartAudio(bookId: number, chapterIndex: number, partIndex: number) {

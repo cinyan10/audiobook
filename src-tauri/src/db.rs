@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 
 use crate::cefr;
@@ -14,6 +14,7 @@ use crate::epub::ExtractedBlockKind;
 use crate::models::{
     BookSearchResult, BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload,
     ChapterSummary, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress,
+    WordlistEntry,
 };
 
 const SCHEMA: &str = r#"
@@ -121,12 +122,42 @@ CREATE TABLE IF NOT EXISTS book_word_frequency_cache (
     algorithm_version INTEGER NOT NULL DEFAULT 6
 );
 
+CREATE TABLE IF NOT EXISTS wordlist_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    book_title TEXT NOT NULL DEFAULT '',
+    chapter_index INTEGER NOT NULL,
+    block_index INTEGER NOT NULL,
+    token_index INTEGER NOT NULL,
+    root_word TEXT NOT NULL,
+    original_word TEXT NOT NULL,
+    word_type TEXT NOT NULL DEFAULT '',
+    cefr_level TEXT NOT NULL DEFAULT '',
+    definition_number INTEGER,
+    definition TEXT NOT NULL DEFAULT '',
+    definition_examples TEXT NOT NULL DEFAULT '[]',
+    definition_phonetics TEXT NOT NULL DEFAULT '[]',
+    definition_audio_url TEXT NOT NULL DEFAULT '',
+    definition_source_url TEXT NOT NULL DEFAULT '',
+    definition_lookup_error TEXT NOT NULL DEFAULT '',
+    simple_meaning TEXT NOT NULL DEFAULT '',
+    in_context_meaning TEXT NOT NULL DEFAULT '',
+    original_meaning TEXT NOT NULL DEFAULT '',
+    ai_explanation TEXT NOT NULL DEFAULT '',
+    context TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(root_word)
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
 CREATE INDEX IF NOT EXISTS idx_book_chapters_book ON book_chapters(book_id, chapter_index);
 CREATE INDEX IF NOT EXISTS idx_chapter_blocks_book ON chapter_blocks(book_id, chapter_index, block_index);
 CREATE INDEX IF NOT EXISTS idx_reading_progress_last_read ON reading_progress(last_read_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audio_paragraphs_part ON audio_paragraphs(book_id, chapter_index, part_index, voice);
 CREATE INDEX IF NOT EXISTS idx_book_word_frequencies_book ON book_word_frequencies(book_id);
+CREATE INDEX IF NOT EXISTS idx_wordlist_entries_book ON wordlist_entries(book_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wordlist_entries_root ON wordlist_entries(root_word);
 "#;
 
 pub enum ImportOutcome {
@@ -170,6 +201,7 @@ pub fn connect(path: &Path) -> Result<Connection> {
     connection.execute_batch(SCHEMA)?;
     migrate_reading_progress(&connection)?;
     migrate_word_frequency_cache(&connection)?;
+    migrate_wordlist_entries(&connection)?;
     Ok(connection)
 }
 
@@ -227,6 +259,41 @@ fn migrate_word_frequency_cache(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+fn migrate_wordlist_entries(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(wordlist_entries)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_column = |name: &str| columns.iter().any(|column| column == name);
+
+    let migrations = [
+        (
+            "simple_meaning",
+            "ALTER TABLE wordlist_entries ADD COLUMN simple_meaning TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "in_context_meaning",
+            "ALTER TABLE wordlist_entries ADD COLUMN in_context_meaning TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "original_meaning",
+            "ALTER TABLE wordlist_entries ADD COLUMN original_meaning TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "ai_explanation",
+            "ALTER TABLE wordlist_entries ADD COLUMN ai_explanation TEXT NOT NULL DEFAULT ''",
+        ),
+    ];
+
+    for (column, sql) in migrations {
+        if !has_column(column) {
+            connection.execute(sql, [])?;
+        }
+    }
+
     Ok(())
 }
 
@@ -651,6 +718,413 @@ pub fn search_book(
     }
 
     Ok(results)
+}
+
+pub fn list_wordlist_entries(connection: &Connection) -> Result<Vec<WordlistEntry>> {
+    list_wordlist_entries_for_book(connection, None)
+}
+
+pub fn list_book_wordlist_entries(
+    connection: &Connection,
+    book_id: i64,
+) -> Result<Vec<WordlistEntry>> {
+    list_wordlist_entries_for_book(connection, Some(book_id))
+}
+
+pub fn save_wordlist_entry(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    block_index: i64,
+    token_index: usize,
+    word: &str,
+    root_word: &str,
+    context: &str,
+    cefr_level: &str,
+) -> Result<WordlistEntry> {
+    let book_title = connection
+        .query_row(
+            "SELECT title FROM books WHERE id = ?",
+            params![book_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Book not found."))?;
+    let block_text = connection
+        .query_row(
+            r#"
+            SELECT text
+            FROM chapter_blocks
+            WHERE book_id = ?
+              AND block_index = ?
+              AND kind = 'paragraph'
+            "#,
+            params![book_id, block_index],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Word token not found."))?;
+    let tokens = cefr::tokenize_text(&block_text);
+    let token = tokens
+        .get(token_index)
+        .ok_or_else(|| anyhow!("Word token not found."))?;
+    let root = (if !token.root_text.is_empty() {
+        Some(token.root_text.clone())
+    } else {
+        normalized_word_root(root_word).or_else(|| normalized_word_root(word))
+    })
+    .ok_or_else(|| anyhow!("Select one English word."))?;
+    let original_word = if !token.normalized_text.is_empty() {
+        token.text.clone()
+    } else {
+        word.trim().to_string()
+    };
+    if original_word.trim().is_empty() {
+        return Err(anyhow!("Select one English word."));
+    }
+    let stored_context = token_sentence_context(&tokens, token_index)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| clean_context(context));
+    let stored_cefr = token
+        .cefr_level
+        .map(cefr_level_to_storage)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| cefr_level.trim().to_string());
+    let timestamp = now_iso();
+    connection.execute(
+        r#"
+        INSERT OR IGNORE INTO wordlist_entries (
+            book_id, book_title, chapter_index, block_index, token_index,
+            root_word, original_word, cefr_level, context, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+        params![
+            book_id,
+            book_title,
+            chapter_index,
+            block_index,
+            token_index as i64,
+            root,
+            original_word,
+            stored_cefr,
+            stored_context,
+            timestamp,
+            timestamp
+        ],
+    )?;
+    wordlist_entry_by_root(connection, &root)?.ok_or_else(|| anyhow!("Word list entry not found."))
+}
+
+pub fn delete_wordlist_entry(connection: &Connection, root_word: &str) -> Result<bool> {
+    let root = normalized_word_root(root_word).unwrap_or_else(|| root_word.trim().to_lowercase());
+    if root.is_empty() {
+        return Err(anyhow!("Select one English word."));
+    }
+    let removed = connection.execute(
+        "DELETE FROM wordlist_entries WHERE root_word = ?",
+        params![root],
+    )?;
+    Ok(removed > 0)
+}
+
+pub fn wordlist_entry_for_lookup(
+    connection: &Connection,
+    entry_id: i64,
+) -> Result<Option<WordlistEntry>> {
+    wordlist_entry_by_id(connection, entry_id)
+}
+
+pub fn update_wordlist_entry_lookup(
+    connection: &Connection,
+    entry_id: i64,
+    lookup: Option<&crate::dictionary::DictionaryLookup>,
+    lookup_error: &str,
+) -> Result<Option<WordlistEntry>> {
+    let timestamp = now_iso();
+    if let Some(lookup) = lookup {
+        let choice = &lookup.context_definition;
+        connection.execute(
+            r#"
+            UPDATE wordlist_entries
+            SET
+                word_type = COALESCE(NULLIF(?, ''), word_type),
+                cefr_level = COALESCE(NULLIF(?, ''), cefr_level),
+                definition_number = ?,
+                definition = ?,
+                definition_examples = ?,
+                definition_phonetics = ?,
+                definition_audio_url = ?,
+                definition_source_url = ?,
+                definition_lookup_error = '',
+                simple_meaning = ?,
+                in_context_meaning = ?,
+                original_meaning = ?,
+                ai_explanation = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+            params![
+                &lookup.word_type,
+                &lookup.cefr_level,
+                choice.definition_number.map(|number| number as i64),
+                &choice.definition,
+                serde_json::to_string(&choice.examples)?,
+                serde_json::to_string(&lookup.phonetics)?,
+                &lookup.audio_url,
+                &lookup.source_url,
+                &lookup.simple_meaning,
+                &lookup.in_context_meaning,
+                &lookup.original_meaning,
+                &choice.ai_explanation,
+                timestamp,
+                entry_id
+            ],
+        )?;
+    } else {
+        connection.execute(
+            r#"
+            UPDATE wordlist_entries
+            SET definition_lookup_error = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+            params![lookup_error, timestamp, entry_id],
+        )?;
+    }
+    wordlist_entry_by_id(connection, entry_id)
+}
+
+fn list_wordlist_entries_for_book(
+    connection: &Connection,
+    book_id: Option<i64>,
+) -> Result<Vec<WordlistEntry>> {
+    let sql = format!(
+        r#"
+        SELECT
+            w.id,
+            w.book_id,
+            COALESCE(NULLIF(b.title, ''), w.book_title) AS book_title,
+            w.chapter_index,
+            w.block_index,
+            w.token_index,
+            w.root_word,
+            w.original_word,
+            w.word_type,
+            w.cefr_level,
+            w.definition_number,
+            w.definition,
+            w.definition_examples,
+            w.definition_phonetics,
+            w.definition_audio_url,
+            w.definition_source_url,
+            w.definition_lookup_error,
+            w.simple_meaning,
+            w.in_context_meaning,
+            w.original_meaning,
+            w.ai_explanation,
+            w.context,
+            w.created_at,
+            w.updated_at
+        FROM wordlist_entries w
+        LEFT JOIN books b ON b.id = w.book_id
+        {}
+        ORDER BY w.created_at DESC, w.id DESC
+        "#,
+        if book_id.is_some() {
+            "WHERE w.book_id = ?"
+        } else {
+            ""
+        }
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = if let Some(book_id) = book_id {
+        statement.query_map(params![book_id], wordlist_entry_from_row)?
+    } else {
+        statement.query_map([], wordlist_entry_from_row)?
+    };
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn wordlist_entry_by_root(
+    connection: &Connection,
+    root_word: &str,
+) -> Result<Option<WordlistEntry>> {
+    wordlist_entry_by_column(connection, "root_word", root_word)
+}
+
+fn wordlist_entry_by_id(connection: &Connection, entry_id: i64) -> Result<Option<WordlistEntry>> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                w.id,
+                w.book_id,
+                COALESCE(NULLIF(b.title, ''), w.book_title) AS book_title,
+                w.chapter_index,
+                w.block_index,
+                w.token_index,
+                w.root_word,
+                w.original_word,
+                w.word_type,
+                w.cefr_level,
+                w.definition_number,
+                w.definition,
+                w.definition_examples,
+                w.definition_phonetics,
+                w.definition_audio_url,
+                w.definition_source_url,
+                w.definition_lookup_error,
+                w.simple_meaning,
+                w.in_context_meaning,
+                w.original_meaning,
+                w.ai_explanation,
+                w.context,
+                w.created_at,
+                w.updated_at
+            FROM wordlist_entries w
+            LEFT JOIN books b ON b.id = w.book_id
+            WHERE w.id = ?
+            "#,
+            params![entry_id],
+            wordlist_entry_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn wordlist_entry_by_column(
+    connection: &Connection,
+    column: &str,
+    value: &str,
+) -> Result<Option<WordlistEntry>> {
+    let sql = format!(
+        r#"
+        SELECT
+            w.id,
+            w.book_id,
+            COALESCE(NULLIF(b.title, ''), w.book_title) AS book_title,
+            w.chapter_index,
+            w.block_index,
+            w.token_index,
+            w.root_word,
+            w.original_word,
+            w.word_type,
+            w.cefr_level,
+            w.definition_number,
+            w.definition,
+            w.definition_examples,
+            w.definition_phonetics,
+            w.definition_audio_url,
+            w.definition_source_url,
+            w.definition_lookup_error,
+            w.simple_meaning,
+            w.in_context_meaning,
+            w.original_meaning,
+            w.ai_explanation,
+            w.context,
+            w.created_at,
+            w.updated_at
+        FROM wordlist_entries w
+        LEFT JOIN books b ON b.id = w.book_id
+        WHERE w.{column} = ?
+        "#
+    );
+    connection
+        .query_row(&sql, params![value], wordlist_entry_from_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn wordlist_entry_from_row(row: &Row<'_>) -> rusqlite::Result<WordlistEntry> {
+    let definition_examples: String = row.get(12)?;
+    let definition_phonetics: String = row.get(13)?;
+    let definition_number = row
+        .get::<_, Option<i64>>(10)?
+        .map(|number| number.max(0) as usize);
+    Ok(WordlistEntry {
+        id: row.get(0)?,
+        book_id: row.get(1)?,
+        book_title: row.get(2)?,
+        chapter_index: row.get(3)?,
+        block_index: row.get(4)?,
+        token_index: row.get::<_, i64>(5)?.max(0) as usize,
+        root_word: row.get(6)?,
+        original_word: row.get(7)?,
+        word_type: row.get(8)?,
+        cefr_level: row.get(9)?,
+        definition_number,
+        definition: row.get(11)?,
+        definition_examples: json_string_vec(&definition_examples),
+        definition_phonetics: json_string_vec(&definition_phonetics),
+        definition_audio_url: row.get(14)?,
+        definition_source_url: row.get(15)?,
+        definition_lookup_error: row.get(16)?,
+        simple_meaning: row.get(17)?,
+        in_context_meaning: row.get(18)?,
+        original_meaning: row.get(19)?,
+        ai_explanation: row.get(20)?,
+        context: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
+    })
+}
+
+fn json_string_vec(value: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+}
+
+fn normalized_word_root(value: &str) -> Option<String> {
+    cefr::tokenize_text(value)
+        .into_iter()
+        .find_map(|token| {
+            if !token.root_text.is_empty() {
+                Some(token.root_text)
+            } else if !token.normalized_text.is_empty() {
+                Some(token.normalized_text)
+            } else {
+                None
+            }
+        })
+}
+
+fn token_sentence_context(tokens: &[ReaderToken], token_index: usize) -> Option<String> {
+    if token_index >= tokens.len() || tokens[token_index].normalized_text.is_empty() {
+        return None;
+    }
+    let mut start = 0;
+    for index in (0..token_index).rev() {
+        if matches!(tokens[index].text.as_str(), "." | "!" | "?") {
+            start = index + 1;
+            break;
+        }
+    }
+    let mut end = tokens.len();
+    for index in token_index..tokens.len() {
+        if matches!(tokens[index].text.as_str(), "." | "!" | "?") {
+            end = (index + 1).min(tokens.len());
+            while end < tokens.len() && matches!(tokens[end].text.trim(), "\"" | "'" | ")" | "]")
+            {
+                end += 1;
+            }
+            break;
+        }
+    }
+    Some(clean_context(
+        &tokens[start..end]
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<String>(),
+    ))
+}
+
+fn clean_context(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|character| matches!(character, '"' | '\'' | '“' | '”' | '‘' | '’'))
+        .to_string()
 }
 
 pub fn get_part_audio(
@@ -2088,11 +2562,12 @@ mod tests {
         ensure_book_word_frequency_cache(&connection, 1).expect("cache");
         let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
 
-        assert_eq!(frequencies.get("the").map(|frequency| frequency.count), Some(1));
         assert_eq!(
-            frequencies
-                .get("wugalpha")
-                .map(|frequency| frequency.count),
+            frequencies.get("the").map(|frequency| frequency.count),
+            Some(1)
+        );
+        assert_eq!(
+            frequencies.get("wugalpha").map(|frequency| frequency.count),
             Some(4)
         );
         assert_eq!(
@@ -2100,9 +2575,7 @@ mod tests {
             Some(2)
         );
         assert_eq!(
-            frequencies
-                .get("wuggamma")
-                .map(|frequency| frequency.count),
+            frequencies.get("wuggamma").map(|frequency| frequency.count),
             Some(1)
         );
         assert!(!frequencies.contains_key("copyrightonly"));
@@ -2156,8 +2629,187 @@ mod tests {
         ensure_book_word_frequency_cache(&connection, 1).expect("cached");
         let frequencies = book_word_frequency_map(&connection, 1).expect("frequencies");
 
-        assert_eq!(frequencies.get("wugalpha").map(|frequency| frequency.count), Some(4));
+        assert_eq!(
+            frequencies.get("wugalpha").map(|frequency| frequency.count),
+            Some(4)
+        );
         assert!(!frequencies.contains_key("newword"));
+    }
+
+    #[test]
+    fn saves_wordlist_entry_from_reader_token() {
+        let connection = frequency_test_connection();
+
+        let entry = save_wordlist_entry(
+            &connection,
+            1,
+            1,
+            2,
+            2,
+            "wugalpha",
+            "wugalpha",
+            "Fallback context.",
+            "",
+        )
+        .expect("entry");
+        let entries = list_wordlist_entries(&connection).expect("entries");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entry.root_word, "wugalpha");
+        assert_eq!(entry.book_title, "Book");
+        assert_eq!(entry.chapter_index, 1);
+        assert_eq!(entry.block_index, 2);
+        assert_eq!(entry.token_index, 2);
+        assert!(entry.context.contains("wugalpha"));
+    }
+
+    #[test]
+    fn saves_wordlist_entry_when_reader_chapter_differs_from_raw_block() {
+        let connection = frequency_test_connection();
+        let text = "The girl in the seat beside me hadn’t spoken a word to me today, either. Maybe the reason English education in Japan doesn’t work is because they force you into pairs for compulsory conversation.";
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 1, 6, 'paragraph', ?, NULL, '')
+                "#,
+                params![text],
+            )
+            .expect("block");
+        let token_index = cefr::tokenize_text(text)
+            .iter()
+            .position(|token| token.normalized_text == "compulsory")
+            .expect("compulsory token");
+
+        let entry = save_wordlist_entry(
+            &connection,
+            1,
+            99,
+            6,
+            token_index,
+            "compulsory",
+            "compulsory",
+            text,
+            "",
+        )
+        .expect("entry");
+
+        assert_eq!(entry.chapter_index, 99);
+        assert_eq!(entry.block_index, 6);
+        assert_eq!(entry.root_word, "compulsory");
+        assert!(entry.context.contains("compulsory conversation"));
+    }
+
+    #[test]
+    fn wordlist_reuses_existing_root_entry() {
+        let connection = frequency_test_connection();
+
+        let first = save_wordlist_entry(
+            &connection,
+            1,
+            1,
+            2,
+            2,
+            "wugalpha",
+            "wugalpha",
+            "",
+            "",
+        )
+        .expect("first entry");
+        let duplicate = save_wordlist_entry(
+            &connection,
+            1,
+            1,
+            3,
+            0,
+            "wugalpha",
+            "wugalpha",
+            "",
+            "",
+        )
+        .expect("duplicate entry");
+        let entries = list_wordlist_entries(&connection).expect("entries");
+
+        assert_eq!(first.id, duplicate.id);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].block_index, 2);
+    }
+
+    #[test]
+    fn deletes_wordlist_entry_by_root() {
+        let connection = frequency_test_connection();
+        save_wordlist_entry(&connection, 1, 1, 2, 2, "wugalpha", "wugalpha", "", "")
+            .expect("entry");
+
+        assert!(delete_wordlist_entry(&connection, "wugalpha").expect("delete"));
+        assert!(list_wordlist_entries(&connection).expect("entries").is_empty());
+    }
+
+    #[test]
+    fn wordlist_lookup_error_keeps_saved_entry() {
+        let connection = frequency_test_connection();
+        let entry =
+            save_wordlist_entry(&connection, 1, 1, 2, 2, "wugalpha", "wugalpha", "", "")
+                .expect("entry");
+
+        let updated =
+            update_wordlist_entry_lookup(&connection, entry.id, None, "offline").expect("update");
+        let entries = list_wordlist_entries(&connection).expect("entries");
+
+        assert_eq!(updated.expect("updated").definition_lookup_error, "offline");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].definition, "");
+    }
+
+    #[test]
+    fn wordlist_lookup_cache_preserves_ai_enrichment() {
+        let connection = frequency_test_connection();
+        let entry =
+            save_wordlist_entry(&connection, 1, 1, 2, 2, "wugalpha", "wugalpha", "", "")
+                .expect("entry");
+        let lookup = crate::dictionary::DictionaryLookup {
+            word: "wugalpha".to_string(),
+            selected_word: "wugalpha".to_string(),
+            word_type: "adjective".to_string(),
+            cefr_level: "C2".to_string(),
+            phonetics: vec!["/wug-alpha/".to_string()],
+            audio_url: "https://example.com/wugalpha.mp3".to_string(),
+            source_url: "https://example.com/wugalpha".to_string(),
+            definitions: vec![crate::dictionary::DictionaryDefinition {
+                entry_id: "wugalpha".to_string(),
+                word_type: "adjective".to_string(),
+                number: 2,
+                definition: "required by rule".to_string(),
+                examples: vec!["A compulsory task.".to_string()],
+                source_url: "https://example.com/wugalpha".to_string(),
+            }],
+            context_definition: crate::dictionary::DictionaryChoice {
+                entry_id: Some("wugalpha".to_string()),
+                definition_number: Some(2),
+                definition: "required by rule".to_string(),
+                examples: vec!["A compulsory task.".to_string()],
+                ai_explanation: "The context is about being forced into pairs.".to_string(),
+                matched: true,
+            },
+            simple_meaning: "required".to_string(),
+            in_context_meaning: "The conversation exercise is mandatory.".to_string(),
+            original_meaning: "From a sense of compulsion.".to_string(),
+        };
+
+        let updated = update_wordlist_entry_lookup(&connection, entry.id, Some(&lookup), "")
+            .expect("update")
+            .expect("updated");
+
+        assert_eq!(updated.simple_meaning, "required");
+        assert_eq!(
+            updated.in_context_meaning,
+            "The conversation exercise is mandatory."
+        );
+        assert_eq!(updated.original_meaning, "From a sense of compulsion.");
+        assert_eq!(
+            updated.ai_explanation,
+            "The context is about being forced into pairs."
+        );
     }
 
     #[test]

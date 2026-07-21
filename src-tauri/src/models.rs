@@ -91,6 +91,34 @@ pub struct BookSearchResult {
     pub match_count: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct WordlistEntry {
+    pub id: i64,
+    pub book_id: i64,
+    pub book_title: String,
+    pub chapter_index: i64,
+    pub block_index: i64,
+    pub token_index: usize,
+    pub root_word: String,
+    pub original_word: String,
+    pub word_type: String,
+    pub cefr_level: String,
+    pub definition_number: Option<usize>,
+    pub definition: String,
+    pub definition_examples: Vec<String>,
+    pub definition_phonetics: Vec<String>,
+    pub definition_audio_url: String,
+    pub definition_source_url: String,
+    pub definition_lookup_error: String,
+    pub simple_meaning: String,
+    pub in_context_meaning: String,
+    pub original_meaning: String,
+    pub ai_explanation: String,
+    pub context: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PartAudioPayload {
     pub book_id: i64,

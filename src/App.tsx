@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AudioLinesIcon,
+  BookMarkedIcon,
   BookOpenTextIcon,
   ChevronLeftIcon,
   ImportIcon,
@@ -11,6 +12,7 @@ import {
   PauseIcon,
   PlayIcon,
   SearchIcon,
+  Trash2Icon,
   XIcon,
   ZoomInIcon,
   ZoomOutIcon,
@@ -19,12 +21,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { toast } from "sonner";
 
 import {
+  addWordlistEntry,
+  deleteWordlistEntry,
   generatePartAudio,
   getChapter,
   getPartAlignment,
   getPartAudio,
   getReader,
   importBooks,
+  listWordlistEntries,
   listBooks,
   lookupWord,
   saveProgress,
@@ -41,6 +46,7 @@ import type {
   ReaderPayload,
   ReadingProgress,
   TimedToken,
+  WordlistEntry,
 } from "@/types";
 import {
   AlertDialog,
@@ -64,6 +70,7 @@ import { cn } from "@/lib/utils";
 
 type ViewState =
   | { kind: "library" }
+  | { kind: "wordlist" }
   | { kind: "reader"; bookId: number; chapterIndex?: number };
 
 type AudioGenerationProgress = {
@@ -105,7 +112,9 @@ type WordContextMenuState = {
   rootWord: string;
   context: string;
   cefrLevel: string;
-  markedTokenKey: string;
+  chapterIndex: number;
+  blockIndex: number;
+  tokenIndex: number;
   lookupX: number;
   lookupY: number;
   x: number;
@@ -186,6 +195,23 @@ function App() {
     );
   }
 
+  if (view.kind === "wordlist") {
+    return (
+      <TooltipProvider>
+        <WordlistView
+          onBack={() => setView({ kind: "library" })}
+          onOpenEntry={(entry) =>
+            setView({
+              kind: "reader",
+              bookId: entry.book_id,
+              chapterIndex: entry.chapter_index,
+            })
+          }
+        />
+      </TooltipProvider>
+    );
+  }
+
   return (
     <TooltipProvider>
       <LibraryView
@@ -193,6 +219,7 @@ function App() {
         loading={loadingBooks}
         importing={importing}
         onImport={() => void handleImport()}
+        onOpenWordlist={() => setView({ kind: "wordlist" })}
         onOpenBook={(book) =>
           setView({
             kind: "reader",
@@ -209,12 +236,14 @@ function LibraryView({
   loading,
   importing,
   onImport,
+  onOpenWordlist,
   onOpenBook,
 }: {
   books: BookSummary[];
   loading: boolean;
   importing: boolean;
   onImport: () => void;
+  onOpenWordlist: () => void;
   onOpenBook: (book: BookSummary) => void;
 }) {
   return (
@@ -230,10 +259,16 @@ function LibraryView({
               <p className="text-xs text-muted-foreground">{books.length ? `${books.length} books` : "Local reader"}</p>
             </div>
           </div>
-          <Button onClick={onImport} disabled={importing}>
-            <ImportIcon data-icon="inline-start" />
-            {importing ? "Importing" : "Import"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={onOpenWordlist}>
+              <BookMarkedIcon data-icon="inline-start" />
+              Word list
+            </Button>
+            <Button onClick={onImport} disabled={importing}>
+              <ImportIcon data-icon="inline-start" />
+              {importing ? "Importing" : "Import"}
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -258,6 +293,133 @@ function LibraryView({
                 {importing ? "Importing" : "Import EPUB"}
               </Button>
             </EmptyContent>
+          </Empty>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function WordlistView({
+  onBack,
+  onOpenEntry,
+}: {
+  onBack: () => void;
+  onOpenEntry: (entry: WordlistEntry) => void;
+}) {
+  const [entries, setEntries] = useState<WordlistEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refreshEntries = useCallback(async () => {
+    setLoading(true);
+    try {
+      setEntries(await listWordlistEntries());
+    } catch (error) {
+      toast.error(errorMessage(error, "Failed to load word list."));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshEntries();
+  }, [refreshEntries]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<WordlistEntry>("wordlist_entry_enriched", (event) => {
+      setEntries((current) => upsertWordlistEntry(current, event.payload));
+    }).then((unsubscribe) => {
+      if (cancelled) {
+        unsubscribe();
+      } else {
+        unlisten = unsubscribe;
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const removeEntry = (entry: WordlistEntry) => {
+    void deleteWordlistEntry(entry.root_word)
+      .then(() => {
+        setEntries((current) => current.filter((item) => item.root_word !== entry.root_word));
+        toast.success("Removed from word list.");
+      })
+      .catch((error) => toast.error(errorMessage(error, "Failed to remove word.")));
+  };
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
+        <div className="mx-auto grid h-16 w-full max-w-7xl grid-cols-[auto_1fr] items-center gap-3 px-6">
+          <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back to library">
+            <ChevronLeftIcon />
+          </Button>
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-semibold">Word list</h1>
+            <p className="truncate text-xs text-muted-foreground">
+              {entries.length ? `${entries.length} saved word${entries.length === 1 ? "" : "s"}` : "Saved vocabulary"}
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <section className="wordlist-page mx-auto w-full max-w-5xl px-6 py-8">
+        {loading ? (
+          <div className="wordlist-list">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={index} className="h-32 rounded-md" />
+            ))}
+          </div>
+        ) : entries.length ? (
+          <div className="wordlist-list">
+            {entries.map((entry) => (
+              <article key={entry.id} className="wordlist-entry">
+                <button className="wordlist-entry-main" type="button" onClick={() => onOpenEntry(entry)}>
+                  <span className="wordlist-word-row">
+                    <strong>{entry.root_word}</strong>
+                    <span>{entry.original_word}</span>
+                  </span>
+                  <span className="wordlist-meta-row">
+                    {entry.word_type ? <Badge variant="secondary">{entry.word_type}</Badge> : null}
+                    {entry.cefr_level ? <Badge variant="outline">{entry.cefr_level}</Badge> : null}
+                    <span>{entry.book_title}</span>
+                    <span>{formatSavedAt(entry.created_at)}</span>
+                  </span>
+                  <span className="wordlist-context">{highlightContextWord(entry.context, entry.original_word)}</span>
+                  {entry.definition ? (
+                    <span className="wordlist-definition">
+                      <span>{entry.simple_meaning || entry.definition}</span>
+                      {entry.in_context_meaning ? <span>{entry.in_context_meaning}</span> : null}
+                      {entry.definition_examples[0] ? <em>{entry.definition_examples[0]}</em> : null}
+                    </span>
+                  ) : entry.definition_lookup_error ? (
+                    <span className="wordlist-error">{entry.definition_lookup_error}</span>
+                  ) : (
+                    <span className="wordlist-muted">Looking up definition...</span>
+                  )}
+                </button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={() => removeEntry(entry)} aria-label={`Remove ${entry.root_word}`}>
+                      <Trash2Icon />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Remove</TooltipContent>
+                </Tooltip>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <Empty className="rounded-md border border-dashed bg-muted/20">
+            <EmptyHeader>
+              <EmptyTitle>No saved words yet</EmptyTitle>
+              <EmptyDescription>Add words from the reader context menu.</EmptyDescription>
+            </EmptyHeader>
           </Empty>
         )}
       </section>
@@ -357,7 +519,7 @@ function ReaderView({
   const [activeTokenKey, setActiveTokenKey] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState<AudioGenerationProgress | null>(null);
   const [audioState, setAudioState] = useState({ currentTime: 0, duration: 0, playing: false });
-  const [markedTokens, setMarkedTokens] = useState<Set<string>>(() => new Set());
+  const [wordlistEntries, setWordlistEntries] = useState<WordlistEntry[]>([]);
   const [colorMode, setColorMode] = useState<ColorMode>(() => storedColorMode());
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -446,18 +608,40 @@ function ReaderView({
   }, [bookId, chapterIndex, reader]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(markedTokensStorageKey(bookId));
-    if (!stored) {
-      setMarkedTokens(new Set());
-      return;
-    }
-    try {
-      const parsed = JSON.parse(stored);
-      setMarkedTokens(Array.isArray(parsed) ? new Set(parsed.filter((item) => typeof item === "string")) : new Set());
-    } catch {
-      setMarkedTokens(new Set());
-    }
+    let cancelled = false;
+    void listWordlistEntries()
+      .then((entries) => {
+        if (!cancelled) {
+          setWordlistEntries(entries);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWordlistEntries([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [bookId]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<WordlistEntry>("wordlist_entry_enriched", (event) => {
+      setWordlistEntries((current) => upsertWordlistEntry(current, event.payload));
+    }).then((unsubscribe) => {
+      if (cancelled) {
+        unsubscribe();
+      } else {
+        unlisten = unsubscribe;
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(colorModeStorageKey(), colorMode);
@@ -470,6 +654,14 @@ function ReaderView({
   const activePart = useMemo(
     () => activeChapter?.parts.find((item) => item.part_index === partIndex),
     [activeChapter, partIndex],
+  );
+  const wordlistRoots = useMemo(
+    () => new Set(wordlistEntries.map((entry) => entry.root_word)),
+    [wordlistEntries],
+  );
+  const wordlistExactKeys = useMemo(
+    () => new Set(wordlistEntries.map((entry) => wordlistExactKey(entry))),
+    [wordlistEntries],
   );
   const visibleBlocks = useMemo(() => {
     if (!chapter) {
@@ -1145,21 +1337,39 @@ function ReaderView({
     }
   }, [audioState.currentTime, audioState.duration, audioState.playing, partAlignment, saveCurrentProgress]);
 
-  const toggleMarkedToken = useCallback(
-    (tokenKey: string) => {
-      setMarkedTokens((current) => {
-        const next = new Set(current);
-        if (next.has(tokenKey)) {
-          next.delete(tokenKey);
-        } else {
-          next.add(tokenKey);
-        }
-        window.localStorage.setItem(markedTokensStorageKey(bookId), JSON.stringify([...next]));
-        return next;
-      });
-    },
-    [bookId],
-  );
+  const toggleContextMenuWordlist = useCallback(() => {
+    if (!wordContextMenu) {
+      return;
+    }
+    const menu = wordContextMenu;
+    setWordContextMenu(null);
+    if (wordlistRoots.has(menu.rootWord)) {
+      void deleteWordlistEntry(menu.rootWord)
+        .then(() => {
+          setWordlistEntries((current) => current.filter((entry) => entry.root_word !== menu.rootWord));
+          toast.success("Removed from word list.");
+        })
+        .catch((error) => toast.error(errorMessage(error, "Failed to remove word.")));
+      return;
+    }
+    void addWordlistEntry({
+      bookId,
+      chapterIndex: menu.chapterIndex,
+      blockIndex: menu.blockIndex,
+      tokenIndex: menu.tokenIndex,
+      word: menu.word,
+      rootWord: menu.rootWord,
+      context: menu.context,
+      cefrLevel: menu.cefrLevel,
+    })
+      .then((entry) => {
+        setWordlistEntries((current) => upsertWordlistEntry(current, entry));
+        toast.success("Added to word list.", {
+          description: entry.definition ? undefined : "Looking up the definition in the background.",
+        });
+      })
+      .catch((error) => toast.error(errorMessage(error, "Failed to add word.")));
+  }, [bookId, wordContextMenu, wordlistRoots]);
 
   useEffect(() => {
     if (!wordContextMenu) {
@@ -1207,7 +1417,8 @@ function ReaderView({
     (
       token: ChapterPayload["blocks"][number]["tokens"][number],
       blockText: string,
-      markedTokenKeyValue: string,
+      blockIndex: number,
+      tokenIndex: number,
       target: HTMLElement,
       clientX: number,
       clientY: number,
@@ -1225,23 +1436,17 @@ function ReaderView({
         rootWord: token.root_text || token.normalized_text,
         context: blockText,
         cefrLevel: token.cefr_level || "",
-        markedTokenKey: markedTokenKeyValue,
+        chapterIndex,
+        blockIndex,
+        tokenIndex,
         x: clampNumber(clientX, 12, Math.max(12, window.innerWidth - menuWidth - 12)),
         y: clampNumber(clientY, 72, Math.max(72, window.innerHeight - menuHeight - 12)),
         lookupX: clampNumber(bounds.left + bounds.width / 2, 12, Math.max(12, window.innerWidth - dialogWidth - 12)),
         lookupY: clampNumber(bounds.bottom + 8, 72, Math.max(72, window.innerHeight - 120)),
       });
     },
-    [],
+    [chapterIndex],
   );
-
-  const markContextMenuWord = useCallback(() => {
-    if (!wordContextMenu) {
-      return;
-    }
-    toggleMarkedToken(wordContextMenu.markedTokenKey);
-    setWordContextMenu(null);
-  }, [toggleMarkedToken, wordContextMenu]);
 
   const lookupContextMenuWord = useCallback(() => {
     if (!wordContextMenu) {
@@ -1250,7 +1455,26 @@ function ReaderView({
     const requestId = lookupRequestRef.current + 1;
     lookupRequestRef.current = requestId;
     const menu = wordContextMenu;
+    const cachedEntry = wordlistEntries.find(
+      (entry) =>
+        entry.definition &&
+        hasWordlistAiEnrichment(entry) &&
+        (entry.root_word === menu.rootWord ||
+          entry.root_word === menu.word.toLowerCase() ||
+          entry.original_word.toLowerCase() === menu.word.toLowerCase()),
+    );
     setWordContextMenu(null);
+    if (cachedEntry) {
+      setLookupDialog({
+        word: menu.word,
+        x: menu.lookupX,
+        y: menu.lookupY,
+        loading: false,
+        error: null,
+        result: dictionaryLookupFromWordlistEntry(cachedEntry, menu.word),
+      });
+      return;
+    }
     setLookupDialog({
       word: menu.word,
       x: menu.lookupX,
@@ -1287,7 +1511,7 @@ function ReaderView({
           result: null,
         });
       });
-  }, [wordContextMenu]);
+  }, [wordContextMenu, wordlistEntries]);
 
   const openImage = useCallback((image: ReaderImage) => {
     setImageZoom(1);
@@ -1648,16 +1872,17 @@ function ReaderView({
                         data-block-index={block.block_index}
                       >
                         <ReaderTokens
+                          bookId={bookId}
                           block={block}
                           chapterIndex={chapterIndex}
                           colorMode={colorMode}
                           activeTokenKey={activeTokenKey}
                           activeSearchResult={activeSearchResult}
-                          markedTokens={markedTokens}
+                          wordlistRoots={wordlistRoots}
+                          wordlistExactKeys={wordlistExactKeys}
                           timedTokensByKey={timedTokensByKey}
                           onSeekToken={seekToTimedToken}
                           onSeekRelativeToken={seekToRelativeToken}
-                          onToggleMarkedToken={toggleMarkedToken}
                           onOpenWordContextMenu={openWordContextMenu}
                           onTokenRef={(tokenKey, node) => {
                             tokenRefs.current[tokenKey] = node;
@@ -1684,9 +1909,9 @@ function ReaderView({
         {wordContextMenu ? (
           <WordContextMenu
             menu={wordContextMenu}
-            marked={markedTokens.has(wordContextMenu.markedTokenKey)}
+            saved={wordlistRoots.has(wordContextMenu.rootWord)}
             onLookup={lookupContextMenuWord}
-            onMark={markContextMenuWord}
+            onToggleWordlist={toggleContextMenuWordlist}
           />
         ) : null}
         {lookupDialog ? (
@@ -1764,14 +1989,14 @@ function ReaderFigure({
 
 function WordContextMenu({
   menu,
-  marked,
+  saved,
   onLookup,
-  onMark,
+  onToggleWordlist,
 }: {
   menu: WordContextMenuState;
-  marked: boolean;
+  saved: boolean;
   onLookup: () => void;
-  onMark: () => void;
+  onToggleWordlist: () => void;
 }) {
   return (
     <div
@@ -1783,8 +2008,8 @@ function WordContextMenu({
       <button type="button" onClick={onLookup}>
         Look up word
       </button>
-      <button type="button" onClick={onMark}>
-        {marked ? "Unmark word" : "Mark word"}
+      <button type="button" onClick={onToggleWordlist}>
+        {saved ? "Remove from word list" : "Add to word list"}
       </button>
     </div>
   );
@@ -2270,33 +2495,36 @@ function caseInsensitiveTextRange(text: string, query: string) {
 }
 
 function ReaderTokens({
+  bookId,
   block,
   chapterIndex,
   colorMode,
   activeTokenKey,
   activeSearchResult,
-  markedTokens,
+  wordlistRoots,
+  wordlistExactKeys,
   timedTokensByKey,
   onSeekToken,
   onSeekRelativeToken,
-  onToggleMarkedToken,
   onOpenWordContextMenu,
   onTokenRef,
 }: {
+  bookId: number;
   block: ChapterPayload["blocks"][number];
   chapterIndex: number;
   colorMode: ColorMode;
   activeTokenKey: string | null;
   activeSearchResult: ActiveSearchResult | null;
-  markedTokens: Set<string>;
+  wordlistRoots: Set<string>;
+  wordlistExactKeys: Set<string>;
   timedTokensByKey: Map<string, TimedToken>;
   onSeekToken: (blockIndex: number, tokenIndex: number) => void;
   onSeekRelativeToken: (blockIndex: number, tokenIndex: number) => void;
-  onToggleMarkedToken: (tokenKey: string) => void;
   onOpenWordContextMenu: (
     token: ChapterPayload["blocks"][number]["tokens"][number],
     blockText: string,
-    markedTokenKeyValue: string,
+    blockIndex: number,
+    tokenIndex: number,
     target: HTMLElement,
     clientX: number,
     clientY: number,
@@ -2314,10 +2542,13 @@ function ReaderTokens({
   return (
     <>
       {block.tokens.map((token, index) => {
-        const tokenKey = markedTokenKey(chapterIndex, block.block_index, index);
+        const exactKey = wordlistTokenKey(bookId, chapterIndex, block.block_index, index);
         const syncKey = timedTokenKey(block.block_index, index);
         const hasTiming = timedTokensByKey.has(syncKey);
         const colorLevel = colorMode === "frequency" ? token.frequency_level : token.cefr_level;
+        const rootWord = token.root_text || token.normalized_text;
+        const isWordlistExact = wordlistExactKeys.has(exactKey);
+        const isWordlistRoot = Boolean(rootWord && wordlistRoots.has(rootWord) && !isWordlistExact);
         const tokenStart = tokenOffset;
         const tokenEnd = tokenStart + token.text.length;
         const isSearchHit = Boolean(searchRange && tokenEnd > searchRange.start && tokenStart < searchRange.end);
@@ -2330,7 +2561,8 @@ function ReaderTokens({
               "reader-token",
               colorLevel && `level-${colorLevel.toLowerCase()}`,
               token.normalized_text && "clickable",
-              markedTokens.has(tokenKey) && "marked",
+              isWordlistRoot && "wordlisted-root",
+              isWordlistExact && "marked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
               isSearchHit && "search-hit",
@@ -2350,9 +2582,7 @@ function ReaderTokens({
               event.preventDefault();
               event.stopPropagation();
               if (token.normalized_text) {
-                onOpenWordContextMenu(token, block.text, tokenKey, event.currentTarget, event.clientX, event.clientY);
-              } else {
-                onToggleMarkedToken(tokenKey);
+                onOpenWordContextMenu(token, block.text, block.block_index, index, event.currentTarget, event.clientX, event.clientY);
               }
             }}
           >
@@ -2364,16 +2594,97 @@ function ReaderTokens({
   );
 }
 
-function markedTokenKey(chapterIndex: number, blockIndex: number, tokenIndex: number) {
-  return `${chapterIndex}:${blockIndex}:${tokenIndex}`;
+function wordlistExactKey(entry: WordlistEntry) {
+  return wordlistTokenKey(entry.book_id, entry.chapter_index, entry.block_index, entry.token_index);
+}
+
+function wordlistTokenKey(bookId: number, chapterIndex: number, blockIndex: number, tokenIndex: number) {
+  return `${bookId}:${chapterIndex}:${blockIndex}:${tokenIndex}`;
 }
 
 function timedTokenKey(blockIndex: number, tokenIndex: number) {
   return `${blockIndex}:${tokenIndex}`;
 }
 
-function markedTokensStorageKey(bookId: number) {
-  return `readalong:marked-tokens:${bookId}`;
+function upsertWordlistEntry(entries: WordlistEntry[], entry: WordlistEntry) {
+  const index = entries.findIndex((item) => item.id === entry.id || item.root_word === entry.root_word);
+  if (index === -1) {
+    return [entry, ...entries];
+  }
+  const next = [...entries];
+  next[index] = entry;
+  return next;
+}
+
+function dictionaryLookupFromWordlistEntry(entry: WordlistEntry, selectedWord: string): DictionaryLookup {
+  const definitionNumber = entry.definition_number ?? 1;
+  const definition = entry.definition;
+  return {
+    word: entry.root_word,
+    selected_word: selectedWord,
+    word_type: entry.word_type,
+    cefr_level: entry.cefr_level,
+    phonetics: entry.definition_phonetics,
+    audio_url: entry.definition_audio_url,
+    source_url: entry.definition_source_url,
+    definitions: definition
+      ? [
+          {
+            entry_id: entry.root_word,
+            word_type: entry.word_type,
+            number: definitionNumber,
+            definition,
+            examples: entry.definition_examples,
+            source_url: entry.definition_source_url,
+          },
+        ]
+      : [],
+    context_definition: {
+      entry_id: definition ? entry.root_word : null,
+      definition_number: definition ? definitionNumber : null,
+      definition,
+      examples: entry.definition_examples,
+      ai_explanation: entry.ai_explanation,
+      matched: Boolean(definition),
+    },
+    simple_meaning: entry.simple_meaning || definition,
+    in_context_meaning: entry.in_context_meaning,
+    original_meaning: entry.original_meaning,
+  };
+}
+
+function hasWordlistAiEnrichment(entry: WordlistEntry) {
+  return Boolean(entry.simple_meaning.trim() || entry.in_context_meaning.trim());
+}
+
+function highlightContextWord(context: string, word: string) {
+  const trimmedWord = word.trim();
+  if (!context || !trimmedWord) {
+    return context;
+  }
+  const start = context.toLocaleLowerCase().indexOf(trimmedWord.toLocaleLowerCase());
+  if (start === -1) {
+    return context;
+  }
+  const end = start + trimmedWord.length;
+  return (
+    <>
+      {context.slice(0, start)}
+      <mark>{context.slice(start, end)}</mark>
+      {context.slice(end)}
+    </>
+  );
+}
+
+function formatSavedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function colorModeStorageKey() {

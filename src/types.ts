@@ -123,6 +123,33 @@ export type DictionaryLookup = {
   original_meaning: string;
 };
 
+export type WordlistEntry = {
+  id: number;
+  book_id: number;
+  book_title: string;
+  chapter_index: number;
+  block_index: number;
+  token_index: number;
+  root_word: string;
+  original_word: string;
+  word_type: string;
+  cefr_level: string;
+  definition_number: number | null;
+  definition: string;
+  definition_examples: string[];
+  definition_phonetics: string[];
+  definition_audio_url: string;
+  definition_source_url: string;
+  definition_lookup_error: string;
+  simple_meaning: string;
+  in_context_meaning: string;
+  original_meaning: string;
+  ai_explanation: string;
+  context: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PartAudioPayload = {
   book_id: number;
   chapter_index: number;
