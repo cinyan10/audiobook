@@ -742,12 +742,12 @@ svg {
   background: transparent;
 }
 
-.reader-token.synced {
+.reader-token.clickable {
   cursor: pointer;
   border-radius: 0.18em;
 }
 
-.reader-token.synced:hover {
+.reader-token.clickable:hover {
   background: oklch(var(--primary) / 0.1);
 }
 

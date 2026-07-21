@@ -385,6 +385,7 @@ function ReaderView({
   const wordPreviewEndTimeRef = useRef<number | null>(null);
   const lastAutoScrollTokenRef = useRef<string | null>(null);
   const lastSelectionSeekKeyRef = useRef("");
+  const lastContextMenuAtRef = useRef(0);
   const searchRequestRef = useRef(0);
   const lookupRequestRef = useRef(0);
 
@@ -1214,6 +1215,7 @@ function ReaderView({
       if (!token.normalized_text) {
         return;
       }
+      lastContextMenuAtRef.current = Date.now();
       const bounds = target.getBoundingClientRect();
       const menuWidth = 176;
       const menuHeight = 92;
@@ -1351,12 +1353,75 @@ function ReaderView({
     [partAudio, stopWordPreview, timedTokensByKey],
   );
 
+  const seekToRelativeToken = useCallback(
+    (blockIndex: number, tokenIndex: number) => {
+      const audio = audioRef.current;
+      if (!audio || !partAudio) {
+        return;
+      }
+      const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : partAudio.duration_seconds;
+      if (!Number.isFinite(duration) || duration <= 0) {
+        return;
+      }
+
+      let wordCount = 0;
+      let targetWordIndex: number | null = null;
+      let previousTimedWord: { wordIndex: number; token: TimedToken } | null = null;
+      let nextTimedWord: { wordIndex: number; token: TimedToken } | null = null;
+      for (const block of visibleBlocks) {
+        if (block.kind !== "paragraph") {
+          continue;
+        }
+        for (let index = 0; index < block.tokens.length; index += 1) {
+          const token = block.tokens[index];
+          if (!token.normalized_text) {
+            continue;
+          }
+          const timedToken = timedTokensByKey.get(timedTokenKey(block.block_index, index));
+          if (block.block_index === blockIndex && index === tokenIndex) {
+            targetWordIndex = wordCount;
+          } else if (timedToken && targetWordIndex === null) {
+            previousTimedWord = { wordIndex: wordCount, token: timedToken };
+          } else if (timedToken && targetWordIndex !== null && nextTimedWord === null) {
+            nextTimedWord = { wordIndex: wordCount, token: timedToken };
+          }
+          wordCount += 1;
+        }
+      }
+      if (targetWordIndex === null || wordCount === 0) {
+        return;
+      }
+
+      let targetTime: number;
+      if (previousTimedWord && nextTimedWord && nextTimedWord.token.start_time >= previousTimedWord.token.end_time) {
+        const gapWords = nextTimedWord.wordIndex - previousTimedWord.wordIndex;
+        const gapRatio = gapWords <= 0 ? 0 : (targetWordIndex - previousTimedWord.wordIndex) / gapWords;
+        targetTime = previousTimedWord.token.end_time + (nextTimedWord.token.start_time - previousTimedWord.token.end_time) * gapRatio;
+      } else {
+        const ratio = wordCount === 1 ? 0 : targetWordIndex / (wordCount - 1);
+        targetTime = duration * ratio;
+      }
+
+      stopWordPreview();
+      audio.currentTime = clampNumber(targetTime, 0, duration);
+      setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
+      setActiveTokenKey(timedTokenKey(blockIndex, tokenIndex));
+    },
+    [partAudio, stopWordPreview, timedTokensByKey, visibleBlocks],
+  );
+
   useEffect(() => {
     if (!partAlignment?.tokens.length) {
       return;
     }
 
-    const seekSelectedWord = () => {
+    const seekSelectedWord = (event: KeyboardEvent | MouseEvent) => {
+      if (event instanceof MouseEvent && event.button !== 0) {
+        return;
+      }
+      if (Date.now() - lastContextMenuAtRef.current < 500) {
+        return;
+      }
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
         lastSelectionSeekKeyRef.current = "";
@@ -1591,6 +1656,7 @@ function ReaderView({
                           markedTokens={markedTokens}
                           timedTokensByKey={timedTokensByKey}
                           onSeekToken={seekToTimedToken}
+                          onSeekRelativeToken={seekToRelativeToken}
                           onToggleMarkedToken={toggleMarkedToken}
                           onOpenWordContextMenu={openWordContextMenu}
                           onTokenRef={(tokenKey, node) => {
@@ -2212,6 +2278,7 @@ function ReaderTokens({
   markedTokens,
   timedTokensByKey,
   onSeekToken,
+  onSeekRelativeToken,
   onToggleMarkedToken,
   onOpenWordContextMenu,
   onTokenRef,
@@ -2224,6 +2291,7 @@ function ReaderTokens({
   markedTokens: Set<string>;
   timedTokensByKey: Map<string, TimedToken>;
   onSeekToken: (blockIndex: number, tokenIndex: number) => void;
+  onSeekRelativeToken: (blockIndex: number, tokenIndex: number) => void;
   onToggleMarkedToken: (tokenKey: string) => void;
   onOpenWordContextMenu: (
     token: ChapterPayload["blocks"][number]["tokens"][number],
@@ -2261,6 +2329,7 @@ function ReaderTokens({
             className={cn(
               "reader-token",
               colorLevel && `level-${colorLevel.toLowerCase()}`,
+              token.normalized_text && "clickable",
               markedTokens.has(tokenKey) && "marked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
@@ -2273,10 +2342,13 @@ function ReaderTokens({
             onClick={() => {
               if (hasTiming) {
                 onSeekToken(block.block_index, index);
+              } else if (token.normalized_text) {
+                onSeekRelativeToken(block.block_index, index);
               }
             }}
             onContextMenu={(event) => {
               event.preventDefault();
+              event.stopPropagation();
               if (token.normalized_text) {
                 onOpenWordContextMenu(token, block.text, tokenKey, event.currentTarget, event.clientX, event.clientY);
               } else {
