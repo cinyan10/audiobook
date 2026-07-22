@@ -1304,9 +1304,13 @@ function ReaderView({
       setActiveTokenKey(null);
       return;
     }
+    const activeTokenIndex = partAlignment.tokens.findIndex(
+      (token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time,
+    );
     const activeToken =
-      partAlignment.tokens.find((token) => audioState.currentTime >= token.start_time && audioState.currentTime < token.end_time) ??
-      [...partAlignment.tokens].reverse().find((token) => token.start_time <= audioState.currentTime);
+      activeTokenIndex >= 0
+        ? partAlignment.tokens[activeTokenIndex]
+        : [...partAlignment.tokens].reverse().find((token) => token.start_time <= audioState.currentTime);
     activeTimedTokenRef.current = activeToken ?? null;
     const key = activeToken ? timedTokenKey(activeToken.block_index, activeToken.token_index) : null;
     setActiveTokenKey((current) => (current === key ? current : key));
@@ -1322,6 +1326,7 @@ function ReaderView({
     if (!audioState.playing || !key || lastAutoScrollTokenRef.current === key) {
       return;
     }
+
     const element = tokenRefs.current[key];
     if (!element) {
       return;
@@ -1333,7 +1338,7 @@ function ReaderView({
     const visibleBottom = window.innerHeight - bottomInset;
     if (bounds.bottom > visibleBottom || bounds.top < headerInset) {
       lastAutoScrollTokenRef.current = key;
-      element.scrollIntoView({ block: "center", behavior: "smooth" });
+      element.scrollIntoView({ block: "start", behavior: "smooth" });
     }
   }, [audioState.currentTime, audioState.duration, audioState.playing, partAlignment, saveCurrentProgress]);
 

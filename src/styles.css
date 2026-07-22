@@ -762,6 +762,7 @@ svg {
 
 .reader-token {
   background: transparent;
+  scroll-margin-top: 8rem;
 }
 
 .reader-token.clickable {
