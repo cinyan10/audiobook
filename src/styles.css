@@ -612,6 +612,28 @@ svg {
   line-height: 1;
 }
 
+.audio-time {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.audio-time-left {
+  color: oklch(var(--foreground));
+  min-width: 3rem;
+  text-align: right;
+}
+
+.audio-time-current {
+  min-width: 2.25rem;
+  text-align: right;
+}
+
+.audio-time-total {
+  min-width: 2.25rem;
+  text-align: right;
+}
+
 .audio-slider {
   min-width: 8rem;
   flex: 1 1 auto;
@@ -1138,7 +1160,4 @@ svg {
     bottom: 0.75rem;
   }
 
-  .audio-timeline span:last-child {
-    display: none;
-  }
 }
