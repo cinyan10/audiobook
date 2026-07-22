@@ -460,7 +460,10 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0].kind, ExtractedBlockKind::Image));
-        assert_eq!(blocks[0].asset_path.as_deref(), Some("OPS/Images/plate01.jpg"));
+        assert_eq!(
+            blocks[0].asset_path.as_deref(),
+            Some("OPS/Images/plate01.jpg")
+        );
         assert_eq!(blocks[0].alt, "Plate");
     }
 }
