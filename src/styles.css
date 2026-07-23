@@ -390,6 +390,53 @@ svg {
   font-weight: 700;
 }
 
+.chapter-find-bar {
+  position: fixed;
+  top: 4.85rem;
+  right: 1rem;
+  z-index: 25;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 0.35rem;
+  width: min(34rem, calc(100vw - 2rem));
+  border: 1px solid oklch(var(--border));
+  border-radius: calc(var(--radius) - 0.35rem);
+  background: oklch(var(--background) / 0.94);
+  box-shadow: 0 12px 30px oklch(var(--foreground) / 0.1);
+  padding: 0.25rem 0.3rem 0.25rem 0.65rem;
+  color: oklch(var(--muted-foreground));
+  backdrop-filter: blur(12px);
+}
+
+.chapter-find-bar input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: oklch(var(--foreground));
+  font-size: 0.86rem;
+  font-weight: 650;
+  outline: 0;
+}
+
+.chapter-find-bar input::placeholder {
+  color: oklch(var(--muted-foreground));
+}
+
+.chapter-find-bar button {
+  width: 2rem;
+  height: 2rem;
+}
+
+.chapter-find-count {
+  min-width: 3rem;
+  color: oklch(var(--muted-foreground));
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .toc-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -802,6 +849,13 @@ svg {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
   outline: 1px solid oklch(0.74 0.1 78 / 0.34);
+}
+
+.reader-token.find-hit-active,
+.reader-token.find-hit-active[class*="level-"] {
+  background: oklch(0.78 0.16 74 / 0.82);
+  color: oklch(var(--foreground));
+  outline: 2px solid oklch(0.64 0.14 70 / 0.62);
 }
 
 .reader-token.level-a1 {

@@ -5,7 +5,9 @@ import {
   AudioLinesIcon,
   BookMarkedIcon,
   BookOpenTextIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
+  ChevronUpIcon,
   ImportIcon,
   LibraryIcon,
   MenuIcon,
@@ -106,6 +108,18 @@ type SaveProgressOptions = {
 type ActiveSearchResult = {
   blockIndex: number;
   query: string;
+};
+
+type ChapterFindMatch = {
+  blockIndex: number;
+  start: number;
+  end: number;
+};
+
+type ChapterFindRange = {
+  start: number;
+  end: number;
+  active: boolean;
 };
 
 type WordContextMenuState = {
@@ -527,6 +541,10 @@ function ReaderView({
   const [searchResults, setSearchResults] = useState<BookSearchResult[]>([]);
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [activeSearchResult, setActiveSearchResult] = useState<ActiveSearchResult | null>(null);
+  const [chapterFindOpen, setChapterFindOpen] = useState(false);
+  const [chapterFindQuery, setChapterFindQuery] = useState("");
+  const [activeChapterFindIndex, setActiveChapterFindIndex] = useState(0);
+  const [chapterFindScrollRequest, setChapterFindScrollRequest] = useState(0);
   const [dialogImage, setDialogImage] = useState<ReaderImage | null>(null);
   const [wordContextMenu, setWordContextMenu] = useState<WordContextMenuState | null>(null);
   const [lookupDialog, setLookupDialog] = useState<LookupDialogState | null>(null);
@@ -535,6 +553,7 @@ function ReaderView({
   const wordPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const dictionaryAudioRef = useRef<HTMLAudioElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const chapterFindInputRef = useRef<HTMLInputElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const saveQueuedPayloadRef = useRef<SaveProgressInput | null>(null);
@@ -553,6 +572,7 @@ function ReaderView({
   const lastAutoScrollTokenRef = useRef<string | null>(null);
   const lastSelectionSeekKeyRef = useRef("");
   const lastContextMenuAtRef = useRef(0);
+  const lastChapterFindRevealKeyRef = useRef("");
   const searchRequestRef = useRef(0);
   const lookupRequestRef = useRef(0);
 
@@ -694,14 +714,69 @@ function ReaderView({
     }
     return tokens;
   }, [partAlignment]);
+  const chapterFindMatches = useMemo(
+    () => findChapterMatches(chapter, chapterFindQuery),
+    [chapter, chapterFindQuery],
+  );
+  const activeChapterFindMatch = chapterFindOpen ? chapterFindMatches[activeChapterFindIndex] ?? null : null;
+  const chapterFindRangesByBlock = useMemo(() => {
+    if (!chapterFindOpen) {
+      return new Map<number, ChapterFindRange[]>();
+    }
+    const ranges = new Map<number, ChapterFindRange[]>();
+    chapterFindMatches.forEach((match, index) => {
+      const blockRanges = ranges.get(match.blockIndex) ?? [];
+      blockRanges.push({
+        start: match.start,
+        end: match.end,
+        active: index === activeChapterFindIndex,
+      });
+      ranges.set(match.blockIndex, blockRanges);
+    });
+    return ranges;
+  }, [activeChapterFindIndex, chapterFindMatches, chapterFindOpen]);
   const trimmedSearchQuery = searchQuery.trim();
 
   useEffect(() => {
     if (!searchOpen) {
       return;
     }
-    window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    window.requestAnimationFrame(() => searchInputRef.current?.focus({ preventScroll: true }));
   }, [searchOpen]);
+
+  useEffect(() => {
+    if (!chapterFindOpen) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      chapterFindInputRef.current?.focus({ preventScroll: true });
+      chapterFindInputRef.current?.select();
+    });
+  }, [chapterFindOpen]);
+
+  useEffect(() => {
+    if (!chapterFindMatches.length) {
+      if (activeChapterFindIndex !== 0) {
+        setActiveChapterFindIndex(0);
+      }
+      return;
+    }
+    if (activeChapterFindIndex >= chapterFindMatches.length) {
+      setActiveChapterFindIndex(0);
+    }
+  }, [activeChapterFindIndex, chapterFindMatches.length]);
+
+  useEffect(() => {
+    lastChapterFindRevealKeyRef.current = "";
+  }, [chapter?.chapter_index, chapterFindQuery]);
+
+  useEffect(() => {
+    if (!chapterFindOpen || !chapterFindMatches.length) {
+      return;
+    }
+    const closestIndex = closestChapterFindMatchIndex(chapterFindMatches, visibleBlockRef.current);
+    setActiveChapterFindIndex((current) => (current === closestIndex ? current : closestIndex));
+  }, [chapter?.chapter_index, chapterFindMatches, chapterFindOpen]);
 
   const flushQueuedProgress = useCallback(() => {
     if (saveInFlightRef.current) {
@@ -1249,6 +1324,72 @@ function ReaderView({
     });
   }, [activeSearchResult, chapter, visibleBlocks]);
 
+  const openChapterFind = useCallback(() => {
+    setChapterFindOpen(true);
+    setActiveSearchResult(null);
+    window.requestAnimationFrame(() => {
+      chapterFindInputRef.current?.focus({ preventScroll: true });
+      chapterFindInputRef.current?.select();
+    });
+  }, []);
+
+  const closeChapterFind = useCallback(() => {
+    setChapterFindOpen(false);
+  }, []);
+
+  const requestChapterFindScroll = useCallback(() => {
+    setChapterFindScrollRequest((current) => current + 1);
+  }, []);
+
+  const moveChapterFind = useCallback(
+    (direction: 1 | -1) => {
+      if (!chapterFindMatches.length) {
+        return;
+      }
+      setActiveChapterFindIndex((current) => (current + direction + chapterFindMatches.length) % chapterFindMatches.length);
+      requestChapterFindScroll();
+    },
+    [chapterFindMatches.length, requestChapterFindScroll],
+  );
+
+  const confirmChapterFind = useCallback(() => {
+    if (!chapterFindMatches.length) {
+      return;
+    }
+    const revealKey = `${chapter?.chapter_index ?? ""}:${chapterFindQuery}:${activeChapterFindIndex}`;
+    if (lastChapterFindRevealKeyRef.current === revealKey) {
+      const nextIndex = (activeChapterFindIndex + 1) % chapterFindMatches.length;
+      lastChapterFindRevealKeyRef.current = `${chapter?.chapter_index ?? ""}:${chapterFindQuery}:${nextIndex}`;
+      setActiveChapterFindIndex(nextIndex);
+      requestChapterFindScroll();
+      return;
+    }
+    lastChapterFindRevealKeyRef.current = revealKey;
+    requestChapterFindScroll();
+  }, [activeChapterFindIndex, chapter?.chapter_index, chapterFindMatches.length, chapterFindQuery, requestChapterFindScroll]);
+
+  useEffect(() => {
+    if (!chapterFindScrollRequest || !chapterFindOpen || !activeChapterFindMatch || !chapter || !activeChapter) {
+      return;
+    }
+    const targetPart = activeChapter.parts.find(
+      (part) =>
+        activeChapterFindMatch.blockIndex >= part.start_block_index &&
+        activeChapterFindMatch.blockIndex <= part.end_block_index,
+    );
+    if (targetPart && targetPart.part_index !== partIndex) {
+      setPartIndex(targetPart.part_index);
+      return;
+    }
+    if (!visibleBlocks.some((block) => block.block_index === activeChapterFindMatch.blockIndex)) {
+      return;
+    }
+    visibleBlockRef.current = activeChapterFindMatch.blockIndex;
+    scheduleScrollRestore(() => {
+      document.getElementById(blockDomId(activeChapterFindMatch.blockIndex))?.scrollIntoView({ block: "center" });
+    });
+  }, [activeChapter, activeChapterFindMatch, chapter, chapterFindOpen, chapterFindScrollRequest, partIndex, visibleBlocks]);
+
   const generateCurrentPartAudio = useCallback(
     async (regenerate: boolean) => {
       if (!activePart) {
@@ -1340,6 +1481,15 @@ function ReaderView({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        if (chapterFindOpen) {
+          closeChapterFind();
+        } else {
+          openChapterFind();
+        }
+        return;
+      }
       if (event.code !== "Space" || event.repeat || shouldIgnorePlaybackShortcut(event.target)) {
         return;
       }
@@ -1348,7 +1498,7 @@ function ReaderView({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleAudioPlay]);
+  }, [chapterFindOpen, closeChapterFind, openChapterFind, toggleAudioPlay]);
 
   useEffect(() => {
     if (!partAlignment?.tokens.length) {
@@ -1922,6 +2072,19 @@ function ReaderView({
                     {!loadingAlignment && !partAlignment && partAudio?.alignment_error ? <span>Word sync unavailable</span> : null}
                   </div>
                 </div>
+                {chapterFindOpen ? (
+                  <ChapterFindBar
+                    inputRef={chapterFindInputRef}
+                    query={chapterFindQuery}
+                    activeIndex={chapterFindMatches.length ? activeChapterFindIndex : -1}
+                    matchCount={chapterFindMatches.length}
+                    onQueryChange={setChapterFindQuery}
+                    onPrevious={() => moveChapterFind(-1)}
+                    onNext={() => moveChapterFind(1)}
+                    onConfirm={confirmChapterFind}
+                    onClose={closeChapterFind}
+                  />
+                ) : null}
                 <Separator />
                 <div className="reader-text">
                   {visibleBlocks.map((block) =>
@@ -1939,6 +2102,7 @@ function ReaderView({
                           colorMode={colorMode}
                           activeTokenKey={activeTokenKey}
                           activeSearchResult={activeSearchResult}
+                          chapterFindRanges={chapterFindRangesByBlock.get(block.block_index) ?? []}
                           wordlistRoots={wordlistRoots}
                           wordlistExactKeys={wordlistExactKeys}
                           timedTokensByKey={timedTokensByKey}
@@ -2416,6 +2580,73 @@ function SearchPanel({
   );
 }
 
+function ChapterFindBar({
+  inputRef,
+  query,
+  activeIndex,
+  matchCount,
+  onQueryChange,
+  onPrevious,
+  onNext,
+  onConfirm,
+  onClose,
+}: {
+  inputRef: RefObject<HTMLInputElement>;
+  query: string;
+  activeIndex: number;
+  matchCount: number;
+  onQueryChange: (query: string) => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const counter = query.trim() ? `${activeIndex >= 0 ? activeIndex + 1 : 0}/${matchCount}` : "0/0";
+  return (
+    <section
+      className="chapter-find-bar"
+      aria-label="Find in current chapter"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onClose();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.shiftKey) {
+            onPrevious();
+          } else {
+            onConfirm();
+          }
+        }
+      }}
+    >
+      <SearchIcon aria-hidden="true" />
+      <input
+        ref={inputRef}
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+        placeholder="Find in chapter"
+        aria-label="Find in current chapter"
+      />
+      <span className="chapter-find-count" aria-label={`${matchCount} matches`}>
+        {counter}
+      </span>
+      <Button variant="ghost" size="icon" onClick={onPrevious} disabled={!matchCount} aria-label="Previous match">
+        <ChevronUpIcon />
+      </Button>
+      <Button variant="ghost" size="icon" onClick={onNext} disabled={!matchCount} aria-label="Next match">
+        <ChevronDownIcon />
+      </Button>
+      <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close find">
+        <XIcon />
+      </Button>
+    </section>
+  );
+}
+
 function HighlightedSnippet({ result }: { result: BookSearchResult }) {
   const before = result.snippet.slice(0, result.match_start);
   const match = result.snippet.slice(result.match_start, result.match_end);
@@ -2563,6 +2794,71 @@ function caseInsensitiveTextRange(text: string, query: string) {
   return start === -1 ? null : { start, end: start + needle.length };
 }
 
+function findChapterMatches(chapter: ChapterPayload | null, query: string) {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!chapter || !needle) {
+    return [];
+  }
+  const matches: ChapterFindMatch[] = [];
+  for (const block of chapter.blocks) {
+    if (block.kind !== "paragraph") {
+      continue;
+    }
+    const haystack = block.text.toLocaleLowerCase();
+    let start = haystack.indexOf(needle);
+    while (start !== -1) {
+      matches.push({
+        blockIndex: block.block_index,
+        start,
+        end: start + needle.length,
+      });
+      start = haystack.indexOf(needle, start + needle.length);
+    }
+  }
+  return matches;
+}
+
+function closestChapterFindMatchIndex(matches: ChapterFindMatch[], fallbackBlockIndex: number | null) {
+  if (!matches.length) {
+    return 0;
+  }
+  const viewportTop = 0;
+  const viewportBottom = window.innerHeight;
+  const viewportCenter = viewportBottom / 2;
+  let bestDomIndex = -1;
+  let bestDomDistance = Number.POSITIVE_INFINITY;
+  let bestFallbackIndex = 0;
+  let bestFallbackDistance = Number.POSITIVE_INFINITY;
+
+  matches.forEach((match, index) => {
+    const element = document.getElementById(blockDomId(match.blockIndex));
+    if (element) {
+      const bounds = element.getBoundingClientRect();
+      const distance =
+        bounds.bottom < viewportTop
+          ? viewportTop - bounds.bottom
+          : bounds.top > viewportBottom
+            ? bounds.top - viewportBottom
+            : Math.abs((bounds.top + bounds.bottom) / 2 - viewportCenter);
+      if (distance < bestDomDistance) {
+        bestDomDistance = distance;
+        bestDomIndex = index;
+      }
+      return;
+    }
+
+    if (fallbackBlockIndex !== null) {
+      const distance = Math.abs(match.blockIndex - fallbackBlockIndex);
+      if (distance < bestFallbackDistance) {
+        bestFallbackDistance = distance;
+        bestFallbackIndex = index;
+      }
+    }
+  });
+
+  return bestDomIndex === -1 ? bestFallbackIndex : bestDomIndex;
+}
+
 function ReaderTokens({
   bookId,
   block,
@@ -2570,6 +2866,7 @@ function ReaderTokens({
   colorMode,
   activeTokenKey,
   activeSearchResult,
+  chapterFindRanges,
   wordlistRoots,
   wordlistExactKeys,
   timedTokensByKey,
@@ -2584,6 +2881,7 @@ function ReaderTokens({
   colorMode: ColorMode;
   activeTokenKey: string | null;
   activeSearchResult: ActiveSearchResult | null;
+  chapterFindRanges: ChapterFindRange[];
   wordlistRoots: Set<string>;
   wordlistExactKeys: Set<string>;
   timedTokensByKey: Map<string, TimedToken>;
@@ -2620,7 +2918,11 @@ function ReaderTokens({
         const isWordlistRoot = Boolean(rootWord && wordlistRoots.has(rootWord) && !isWordlistExact);
         const tokenStart = tokenOffset;
         const tokenEnd = tokenStart + token.text.length;
-        const isSearchHit = Boolean(searchRange && tokenEnd > searchRange.start && tokenStart < searchRange.end);
+        const isBookSearchHit = Boolean(searchRange && tokenEnd > searchRange.start && tokenStart < searchRange.end);
+        const isChapterFindHit = chapterFindRanges.some((range) => tokenEnd > range.start && tokenStart < range.end);
+        const isActiveChapterFindHit = chapterFindRanges.some(
+          (range) => range.active && tokenEnd > range.start && tokenStart < range.end,
+        );
         tokenOffset = tokenEnd;
         return (
           <span
@@ -2634,7 +2936,8 @@ function ReaderTokens({
               isWordlistExact && "marked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
-              isSearchHit && "search-hit",
+              (isBookSearchHit || isChapterFindHit) && "search-hit",
+              isActiveChapterFindHit && "find-hit-active",
             )}
             data-cefr-level={token.cefr_level || undefined}
             data-frequency-level={token.frequency_level || undefined}
