@@ -35,6 +35,7 @@ import {
   saveProgress,
   searchBook,
   syncPartAlignment,
+  type SaveProgressInput,
 } from "@/lib/api";
 import type {
   BookSearchResult,
@@ -536,6 +537,10 @@ function ReaderView({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const visibleBlockRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const saveQueuedPayloadRef = useRef<SaveProgressInput | null>(null);
+  const saveFlushScheduledRef = useRef(false);
+  const saveInFlightRef = useRef(false);
+  const audioSaveTimerRef = useRef<number | null>(null);
   const lastAudioSaveAtRef = useRef(0);
   const pendingResumeRef = useRef<PendingResume | null>(null);
   const pendingAudioResumeTimeRef = useRef<number | null>(null);
@@ -698,6 +703,48 @@ function ReaderView({
     window.requestAnimationFrame(() => searchInputRef.current?.focus());
   }, [searchOpen]);
 
+  const flushQueuedProgress = useCallback(() => {
+    if (saveInFlightRef.current) {
+      return;
+    }
+    const payload = saveQueuedPayloadRef.current;
+    if (!payload) {
+      return;
+    }
+
+    saveQueuedPayloadRef.current = null;
+    saveInFlightRef.current = true;
+    void saveProgress(payload)
+      .catch((error) => {
+        toast.error(errorMessage(error, "Failed to save progress."));
+      })
+      .finally(() => {
+        saveInFlightRef.current = false;
+        if (saveQueuedPayloadRef.current && !saveFlushScheduledRef.current) {
+          saveFlushScheduledRef.current = true;
+          window.setTimeout(() => {
+            saveFlushScheduledRef.current = false;
+            flushQueuedProgress();
+          }, 0);
+        }
+      });
+  }, []);
+
+  const queueProgressSave = useCallback(
+    (payload: SaveProgressInput) => {
+      saveQueuedPayloadRef.current = payload;
+      if (saveInFlightRef.current || saveFlushScheduledRef.current) {
+        return;
+      }
+      saveFlushScheduledRef.current = true;
+      window.setTimeout(() => {
+        saveFlushScheduledRef.current = false;
+        flushQueuedProgress();
+      }, 0);
+    },
+    [flushQueuedProgress],
+  );
+
   useEffect(() => {
     const requestId = searchRequestRef.current + 1;
     searchRequestRef.current = requestId;
@@ -769,18 +816,12 @@ function ReaderView({
         lastPlayingTokenIndex: lastPlayingToken?.token_index ?? null,
       };
 
-      const persist = () => {
-        void saveProgress(payload).catch((error) => {
-          toast.error(errorMessage(error, "Failed to save progress."));
-        });
-      };
-
       if (options.immediate) {
         if (saveTimerRef.current) {
           window.clearTimeout(saveTimerRef.current);
           saveTimerRef.current = null;
         }
-        persist();
+        queueProgressSave(payload);
         return;
       }
 
@@ -789,10 +830,10 @@ function ReaderView({
       }
       saveTimerRef.current = window.setTimeout(() => {
         saveTimerRef.current = null;
-        persist();
+        queueProgressSave(payload);
       }, 900);
     },
-    [activePart, bookId, chapter, chapterIndex, partAlignment, partAudio, reader],
+    [activePart, bookId, chapter, chapterIndex, partAlignment, partAudio, queueProgressSave, reader],
   );
 
   useEffect(() => {
@@ -1097,6 +1138,15 @@ function ReaderView({
         lastPlayingToken: activeTimedTokenRef.current,
       });
     };
+    const scheduleImmediatePlaybackPosition = () => {
+      if (audioSaveTimerRef.current) {
+        window.clearTimeout(audioSaveTimerRef.current);
+      }
+      audioSaveTimerRef.current = window.setTimeout(() => {
+        audioSaveTimerRef.current = null;
+        savePlaybackPosition(true);
+      }, 150);
+    };
     const saveThrottledPlaybackPosition = () => {
       const now = Date.now();
       if (now - lastAudioSaveAtRef.current < 2000) {
@@ -1105,16 +1155,18 @@ function ReaderView({
       lastAudioSaveAtRef.current = now;
       savePlaybackPosition(false);
     };
-    const saveImmediatePlaybackPosition = () => savePlaybackPosition(true);
-
     audio.addEventListener("timeupdate", saveThrottledPlaybackPosition);
-    audio.addEventListener("pause", saveImmediatePlaybackPosition);
-    audio.addEventListener("seeked", saveImmediatePlaybackPosition);
+    audio.addEventListener("pause", scheduleImmediatePlaybackPosition);
+    audio.addEventListener("seeked", scheduleImmediatePlaybackPosition);
     return () => {
-      saveImmediatePlaybackPosition();
+      if (audioSaveTimerRef.current) {
+        window.clearTimeout(audioSaveTimerRef.current);
+        audioSaveTimerRef.current = null;
+      }
+      savePlaybackPosition(true);
       audio.removeEventListener("timeupdate", saveThrottledPlaybackPosition);
-      audio.removeEventListener("pause", saveImmediatePlaybackPosition);
-      audio.removeEventListener("seeked", saveImmediatePlaybackPosition);
+      audio.removeEventListener("pause", scheduleImmediatePlaybackPosition);
+      audio.removeEventListener("seeked", scheduleImmediatePlaybackPosition);
     };
   }, [partAudio, saveCurrentProgress]);
 
@@ -1661,21 +1713,25 @@ function ReaderView({
         lastSelectionSeekKeyRef.current = "";
         return;
       }
-      const range = selection.getRangeAt(0);
-      for (const token of partAlignment.tokens) {
-        const key = timedTokenKey(token.block_index, token.token_index);
-        const element = tokenRefs.current[key];
-        if (!element || !range.intersectsNode(element) || element.textContent?.trim() !== text) {
-          continue;
-        }
-        const seekKey = `${key}:${text}`;
-        if (lastSelectionSeekKeyRef.current === seekKey) {
-          return;
-        }
-        lastSelectionSeekKeyRef.current = seekKey;
-        seekToTimedToken(token.block_index, token.token_index);
+      const selectedNode = selection.anchorNode;
+      const selectedElement =
+        selectedNode instanceof HTMLElement ? selectedNode : selectedNode?.parentElement ?? null;
+      const tokenElement = selectedElement?.closest<HTMLElement>("[data-timed-token-key]");
+      if (!tokenElement || tokenElement.textContent?.trim() !== text) {
         return;
       }
+      const blockIndex = Number(tokenElement.dataset.blockIndex);
+      const tokenIndex = Number(tokenElement.dataset.tokenIndex);
+      const key = tokenElement.dataset.timedTokenKey ?? "";
+      if (!Number.isFinite(blockIndex) || !Number.isFinite(tokenIndex) || !timedTokensByKey.has(key)) {
+        return;
+      }
+      const seekKey = `${key}:${text}`;
+      if (lastSelectionSeekKeyRef.current === seekKey) {
+        return;
+      }
+      lastSelectionSeekKeyRef.current = seekKey;
+      seekToTimedToken(blockIndex, tokenIndex);
     };
 
     document.addEventListener("mouseup", seekSelectedWord);
@@ -1684,7 +1740,7 @@ function ReaderView({
       document.removeEventListener("mouseup", seekSelectedWord);
       document.removeEventListener("keyup", seekSelectedWord);
     };
-  }, [partAlignment, seekToTimedToken]);
+  }, [partAlignment, seekToTimedToken, timedTokensByKey]);
 
   const audioGenerationPercent = Math.round(audioProgress?.percent ?? 0);
   const audioGenerationStatus =
@@ -2584,6 +2640,9 @@ function ReaderTokens({
             data-frequency-level={token.frequency_level || undefined}
             data-frequency-count={token.frequency_count || undefined}
             data-root-text={token.root_text || undefined}
+            data-block-index={block.block_index}
+            data-token-index={index}
+            data-timed-token-key={syncKey}
             onClick={() => {
               if (hasTiming) {
                 onSeekToken(block.block_index, index);
