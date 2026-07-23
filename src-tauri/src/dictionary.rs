@@ -89,53 +89,57 @@ pub async fn lookup_word(
         .context("Unable to create dictionary HTTP client")?;
 
     let mut last_error = None;
-    let mut first_page = None;
-    let mut lookup_word = selected_word.clone();
+    let mut entries = Vec::new();
+    let mut definitions = Vec::new();
     for candidate in lookup_words {
         match fetch_first_page(&client, &candidate).await {
             Ok(page) => {
-                lookup_word = candidate;
-                first_page = Some(page);
+                let mut urls = candidate_urls(&page.html, &page.source_url, &candidate);
+                if urls.is_empty() {
+                    urls.push(page.source_url.clone());
+                }
+
+                let mut candidate_entries = Vec::new();
+                for (index, url) in urls.into_iter().take(MAX_CANDIDATE_PAGES).enumerate() {
+                    let page = if index == 0 && url == page.source_url {
+                        FetchedPage {
+                            html: page.html.clone(),
+                            source_url: page.source_url.clone(),
+                        }
+                    } else {
+                        match fetch_page(&client, &url).await {
+                            Ok(page) => page,
+                            Err(FetchError::NotFound) => continue,
+                            Err(FetchError::Other(error)) => return Err(error),
+                        }
+                    };
+                    candidate_entries.push(parse_oxford_entry(
+                        &page.html,
+                        &page.source_url,
+                        &candidate,
+                    ));
+                }
+
+                let candidate_definitions = candidate_entries
+                    .iter()
+                    .flat_map(|entry| entry.definitions.clone())
+                    .collect::<Vec<_>>();
+                if candidate_definitions.is_empty() {
+                    last_error = Some(anyhow!("No Oxford definitions found for {candidate}."));
+                    continue;
+                }
+
+                entries = candidate_entries;
+                definitions = candidate_definitions;
                 break;
             }
             Err(error) => last_error = Some(error),
         }
     }
-    let first_page = first_page.ok_or_else(|| {
-        last_error.unwrap_or_else(|| anyhow!("Oxford lookup failed for {selected_word}."))
-    })?;
-    let mut urls = candidate_urls(&first_page.html, &first_page.source_url, &lookup_word);
-    if urls.is_empty() {
-        urls.push(first_page.source_url.clone());
-    }
-
-    let mut entries = Vec::new();
-    for (index, url) in urls.into_iter().take(MAX_CANDIDATE_PAGES).enumerate() {
-        let page = if index == 0 && url == first_page.source_url {
-            FetchedPage {
-                html: first_page.html.clone(),
-                source_url: first_page.source_url.clone(),
-            }
-        } else {
-            match fetch_page(&client, &url).await {
-                Ok(page) => page,
-                Err(FetchError::NotFound) => continue,
-                Err(FetchError::Other(error)) => return Err(error),
-            }
-        };
-        entries.push(parse_oxford_entry(
-            &page.html,
-            &page.source_url,
-            &lookup_word,
-        ));
-    }
-
-    let definitions = entries
-        .iter()
-        .flat_map(|entry| entry.definitions.clone())
-        .collect::<Vec<_>>();
     if definitions.is_empty() {
-        return Err(anyhow!("No Oxford definitions found for {lookup_word}."));
+        return Err(
+            last_error.unwrap_or_else(|| anyhow!("Oxford lookup failed for {selected_word}."))
+        );
     }
 
     let choice = choose_definition(&client, &selected_word, &context, &definitions).await;
@@ -597,7 +601,7 @@ fn preferred_audio_url(urls: &[String], word: &str) -> String {
 
 fn lookup_candidates(selected_word: &str, root_word: &str) -> Vec<String> {
     let mut stems = Vec::new();
-    let mut candidates = Vec::new();
+    let mut candidates = vec![selected_word.to_string()];
     if let Some(root) = normalize_word(root_word) {
         if root != selected_word {
             stems.push(root);
@@ -622,17 +626,21 @@ fn lookup_candidates(selected_word: &str, root_word: &str) -> Vec<String> {
     }
     if selected_word.len() > 5 && selected_word.ends_with("ing") {
         let stem = &selected_word[..selected_word.len() - 3];
-        stems.push(stem.to_string());
-        stems.push(format!("{stem}e"));
+        if stem.ends_with("at") {
+            stems.push(format!("{stem}e"));
+        }
         if stem.len() > 2 {
             let mut chars = stem.chars().rev();
             if chars.next() == chars.next() {
                 stems.push(stem[..stem.len() - 1].to_string());
             }
         }
+        stems.push(stem.to_string());
+        if !stem.ends_with("at") {
+            stems.push(format!("{stem}e"));
+        }
     }
     candidates.extend(stems);
-    candidates.push(selected_word.to_string());
     unique(candidates)
 }
 
@@ -778,11 +786,15 @@ mod tests {
     fn builds_lookup_candidates_for_inflected_words() {
         assert_eq!(
             lookup_candidates("resisting", ""),
-            vec!["resist", "resiste", "resisting"]
+            vec!["resisting", "resist", "resiste"]
         );
         assert_eq!(
             lookup_candidates("answered", ""),
-            vec!["answer", "answere", "answered"]
+            vec!["answered", "answer", "answere"]
+        );
+        assert_eq!(
+            lookup_candidates("contemplating", ""),
+            vec!["contemplating", "contemplate", "contemplat"]
         );
     }
 
