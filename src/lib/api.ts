@@ -9,6 +9,7 @@ import type {
   PartAlignmentPayload,
   PartAudioPayload,
   ReaderPayload,
+  ReadingBookmark,
   WordlistEntry,
 } from "@/types";
 
@@ -22,6 +23,32 @@ export function importBooks(paths: string[]) {
 
 export function getReader(bookId: number) {
   return invoke<ReaderPayload>("get_reader", { bookId });
+}
+
+export type SaveBookmarkInput = {
+  bookId: number;
+  chapterIndex: number;
+  partIndex: number;
+  blockIndex: number;
+  tokenIndex: number;
+  word: string;
+  rootWord: string;
+  scrollRatio: number;
+  progressPercent: number;
+};
+
+export function saveBookmark(input: SaveBookmarkInput) {
+  return invoke<ReadingBookmark>("save_bookmark", {
+    bookId: input.bookId,
+    chapterIndex: input.chapterIndex,
+    partIndex: input.partIndex,
+    blockIndex: input.blockIndex,
+    tokenIndex: input.tokenIndex,
+    word: input.word,
+    rootWord: input.rootWord,
+    scrollRatio: input.scrollRatio,
+    progressPercent: input.progressPercent,
+  });
 }
 
 export function getChapter(bookId: number, chapterIndex: number) {

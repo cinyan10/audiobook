@@ -50,6 +50,20 @@ pub struct ReadingProgress {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ReadingBookmark {
+    pub created_at: String,
+    pub updated_at: String,
+    pub chapter_index: i64,
+    pub part_index: i64,
+    pub block_index: i64,
+    pub token_index: i64,
+    pub word: String,
+    pub root_word: String,
+    pub scroll_ratio: f64,
+    pub progress_percent: f64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ReaderPayload {
     pub id: i64,
     pub title: String,
@@ -57,6 +71,7 @@ pub struct ReaderPayload {
     pub cover_asset_path: Option<String>,
     pub chapters: Vec<ChapterSummary>,
     pub progress: ReadingProgress,
+    pub bookmark: Option<ReadingBookmark>,
     pub total_blocks: i64,
     pub total_progress_units: i64,
 }

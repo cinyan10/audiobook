@@ -46,6 +46,7 @@ pub fn run() {
             commands::generate_part_audio,
             commands::sync_part_alignment,
             commands::save_progress,
+            commands::save_bookmark,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Readalong");

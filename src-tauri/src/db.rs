@@ -13,8 +13,8 @@ use crate::epub;
 use crate::epub::ExtractedBlockKind;
 use crate::models::{
     BookSearchResult, BookSummary, ChapterBlock, ChapterPartSummary, ChapterPayload,
-    ChapterSummary, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingProgress,
-    WordlistEntry,
+    ChapterSummary, PartAlignmentPayload, PartAudioPayload, ReaderPayload, ReadingBookmark,
+    ReadingProgress, WordlistEntry,
 };
 
 const SCHEMA: &str = r#"
@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     last_audio_duration_seconds REAL,
     last_playing_block_index INTEGER,
     last_playing_token_index INTEGER,
+    progress_percent REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS bookmarks (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    chapter_index INTEGER NOT NULL DEFAULT 0,
+    part_index INTEGER NOT NULL DEFAULT 0,
+    block_index INTEGER NOT NULL DEFAULT 0,
+    token_index INTEGER NOT NULL DEFAULT 0,
+    word TEXT NOT NULL DEFAULT '',
+    root_word TEXT NOT NULL DEFAULT '',
+    scroll_ratio REAL NOT NULL DEFAULT 0,
     progress_percent REAL NOT NULL DEFAULT 0
 );
 
@@ -560,6 +574,41 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
     {
         progress.progress_percent = percent;
     }
+    let bookmark = connection
+        .query_row(
+            r#"
+            SELECT
+                created_at,
+                updated_at,
+                chapter_index,
+                part_index,
+                block_index,
+                token_index,
+                word,
+                root_word,
+                scroll_ratio,
+                progress_percent
+            FROM bookmarks
+            WHERE book_id = ?
+            "#,
+            params![book_id],
+            |row| {
+                Ok(ReadingBookmark {
+                    created_at: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    chapter_index: row.get(2)?,
+                    part_index: row.get(3)?,
+                    block_index: row.get(4)?,
+                    token_index: row.get(5)?,
+                    word: row.get(6)?,
+                    root_word: row.get(7)?,
+                    scroll_ratio: row.get(8)?,
+                    progress_percent: row.get(9)?,
+                })
+            },
+        )
+        .optional()?
+        .map(|bookmark| normalize_bookmark(bookmark, &chapters));
 
     Ok(Some(ReaderPayload {
         id,
@@ -568,6 +617,7 @@ pub fn get_reader(connection: &Connection, book_id: i64) -> Result<Option<Reader
         cover_asset_path,
         chapters,
         progress,
+        bookmark,
         total_blocks,
         total_progress_units,
     }))
@@ -1585,6 +1635,80 @@ pub fn save_progress(
     Ok(())
 }
 
+pub fn save_bookmark(
+    connection: &Connection,
+    book_id: i64,
+    chapter_index: i64,
+    part_index: i64,
+    block_index: i64,
+    token_index: i64,
+    word: &str,
+    root_word: &str,
+    scroll_ratio: f64,
+    progress_percent: f64,
+) -> Result<ReadingBookmark> {
+    let timestamp = now_iso();
+    let scroll = scroll_ratio.clamp(0.0, 1.0);
+    let progress = progress_percent.clamp(0.0, 100.0);
+    let bookmark = normalize_bookmark(
+        ReadingBookmark {
+            created_at: timestamp.clone(),
+            updated_at: timestamp.clone(),
+            chapter_index,
+            part_index,
+            block_index,
+            token_index,
+            word: word.to_string(),
+            root_word: root_word.to_string(),
+            scroll_ratio: scroll,
+            progress_percent: progress,
+        },
+        &chapter_summaries(connection, book_id)?,
+    );
+    connection.execute(
+        r#"
+        INSERT INTO bookmarks (
+            book_id,
+            created_at,
+            updated_at,
+            chapter_index,
+            part_index,
+            block_index,
+            token_index,
+            word,
+            root_word,
+            scroll_ratio,
+            progress_percent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(book_id) DO UPDATE SET
+            created_at = bookmarks.created_at,
+            updated_at = excluded.updated_at,
+            chapter_index = excluded.chapter_index,
+            part_index = excluded.part_index,
+            block_index = excluded.block_index,
+            token_index = excluded.token_index,
+            word = excluded.word,
+            root_word = excluded.root_word,
+            scroll_ratio = excluded.scroll_ratio,
+            progress_percent = excluded.progress_percent
+        "#,
+        params![
+            book_id,
+            &bookmark.created_at,
+            &bookmark.updated_at,
+            bookmark.chapter_index,
+            bookmark.part_index,
+            bookmark.block_index,
+            bookmark.token_index,
+            &bookmark.word,
+            &bookmark.root_word,
+            bookmark.scroll_ratio,
+            bookmark.progress_percent
+        ],
+    )?;
+    Ok(bookmark)
+}
+
 fn normalize_reading_progress(
     mut progress: ReadingProgress,
     chapters: &[ChapterSummary],
@@ -1624,6 +1748,49 @@ fn normalize_reading_progress(
     progress.last_part_index = 0;
     progress.last_block_index = 0;
     progress
+}
+
+fn normalize_bookmark(
+    mut bookmark: ReadingBookmark,
+    chapters: &[ChapterSummary],
+) -> ReadingBookmark {
+    if let Some(chapter) = chapters.iter().find(|chapter| {
+        bookmark.block_index >= chapter.start_block_index
+            && bookmark.block_index <= chapter.end_block_index
+    }) {
+        bookmark.chapter_index = chapter.chapter_index;
+        bookmark.part_index = chapter
+            .parts
+            .iter()
+            .find(|part| {
+                bookmark.block_index >= part.start_block_index
+                    && bookmark.block_index <= part.end_block_index
+            })
+            .map(|part| part.part_index)
+            .unwrap_or(0);
+        return bookmark;
+    }
+
+    if let Some(chapter) = chapters
+        .iter()
+        .find(|chapter| chapter.chapter_index == bookmark.chapter_index)
+    {
+        if !chapter
+            .parts
+            .iter()
+            .any(|part| part.part_index == bookmark.part_index)
+        {
+            bookmark.part_index = 0;
+        }
+        bookmark.block_index = chapter.start_block_index;
+        return bookmark;
+    }
+
+    bookmark.chapter_index = 0;
+    bookmark.part_index = 0;
+    bookmark.block_index = 0;
+    bookmark.token_index = 0;
+    bookmark
 }
 
 fn progress_percent_for_block(
@@ -3007,6 +3174,73 @@ mod tests {
         assert_eq!(reader.progress.last_playing_block_index, Some(41));
         assert_eq!(reader.progress.last_playing_token_index, Some(7));
         assert_eq!(reader.progress.progress_percent, 100.0);
+    }
+
+    #[test]
+    fn saves_and_overwrites_word_bookmark() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("schema");
+        let timestamp = now_iso();
+        connection
+            .execute(
+                r#"
+                INSERT INTO books (
+                    id, slug, title, author, content_hash, original_filename, stored_path,
+                    cover_asset_path, created_at, updated_at
+                ) VALUES (1, 'book', 'Book', '', 'hash', 'book.epub', '/tmp/book.epub', NULL, ?, ?)
+                "#,
+                params![timestamp, timestamp],
+            )
+            .expect("book");
+        connection
+            .execute(
+                r#"
+                INSERT INTO book_chapters (
+                    book_id, chapter_index, title, source_href, start_block_index, end_block_index
+                ) VALUES (1, 0, '1 Chapter', 'chapter001.xhtml', 40, 50)
+                "#,
+                [],
+            )
+            .expect("chapter");
+        connection
+            .execute(
+                r#"
+                INSERT INTO chapter_blocks (book_id, chapter_index, block_index, kind, text, asset_path, alt)
+                VALUES (1, 0, 42, 'paragraph', 'First bookmarked word', NULL, '')
+                "#,
+                [],
+            )
+            .expect("block");
+
+        save_bookmark(
+            &connection,
+            1,
+            0,
+            0,
+            42,
+            1,
+            "bookmarked",
+            "bookmark",
+            1.25,
+            125.0,
+        )
+        .expect("save bookmark");
+        save_bookmark(&connection, 1, 0, 0, 42, 2, "word", "word", 0.25, 35.0)
+            .expect("overwrite bookmark");
+
+        let bookmark = get_reader(&connection, 1)
+            .expect("reader")
+            .expect("book")
+            .bookmark
+            .expect("bookmark");
+        assert_eq!(bookmark.chapter_index, 0);
+        assert_eq!(bookmark.part_index, 0);
+        assert_eq!(bookmark.block_index, 42);
+        assert_eq!(bookmark.token_index, 2);
+        assert_eq!(bookmark.word, "word");
+        assert_eq!(bookmark.root_word, "word");
+        assert_eq!(bookmark.scroll_ratio, 0.25);
+        assert_eq!(bookmark.progress_percent, 35.0);
     }
 
     #[test]

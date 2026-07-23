@@ -41,6 +41,19 @@ export type ReadingProgress = {
   progress_percent: number;
 };
 
+export type ReadingBookmark = {
+  created_at: string;
+  updated_at: string;
+  chapter_index: number;
+  part_index: number;
+  block_index: number;
+  token_index: number;
+  word: string;
+  root_word: string;
+  scroll_ratio: number;
+  progress_percent: number;
+};
+
 export type ReaderPayload = {
   id: number;
   title: string;
@@ -48,6 +61,7 @@ export type ReaderPayload = {
   cover_asset_path: string | null;
   chapters: ChapterSummary[];
   progress: ReadingProgress;
+  bookmark: ReadingBookmark | null;
   total_blocks: number;
   total_progress_units: number;
 };

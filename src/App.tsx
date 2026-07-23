@@ -5,6 +5,7 @@ import {
   AudioLinesIcon,
   BookMarkedIcon,
   BookOpenTextIcon,
+  BookmarkIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronUpIcon,
@@ -34,6 +35,7 @@ import {
   listWordlistEntries,
   listBooks,
   lookupWord,
+  saveBookmark,
   saveProgress,
   searchBook,
   syncPartAlignment,
@@ -47,6 +49,7 @@ import type {
   PartAlignmentPayload,
   PartAudioPayload,
   ReaderPayload,
+  ReadingBookmark,
   ReadingProgress,
   TimedToken,
   WordlistEntry,
@@ -91,9 +94,15 @@ type ReaderImage = {
   alt: string;
 };
 
-type PendingResume = {
-  progress: ReadingProgress;
-};
+type PendingRestore =
+  | {
+      kind: "progress";
+      progress: ReadingProgress;
+    }
+  | {
+      kind: "bookmark";
+      bookmark: ReadingBookmark;
+    };
 
 type ColorMode = "frequency" | "cefr";
 
@@ -561,7 +570,7 @@ function ReaderView({
   const saveInFlightRef = useRef(false);
   const audioSaveTimerRef = useRef<number | null>(null);
   const lastAudioSaveAtRef = useRef(0);
-  const pendingResumeRef = useRef<PendingResume | null>(null);
+  const pendingRestoreRef = useRef<PendingRestore | null>(null);
   const pendingAudioResumeTimeRef = useRef<number | null>(null);
   const audioLookupPendingRef = useRef(false);
   const alignmentLookupPendingRef = useRef(false);
@@ -579,6 +588,7 @@ function ReaderView({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    pendingRestoreRef.current = null;
     void getReader(bookId)
       .then((payload) => {
         if (cancelled) {
@@ -586,16 +596,32 @@ function ReaderView({
         }
         setReader(payload);
         const shouldResume = initialChapterIndex === undefined;
-        pendingResumeRef.current = shouldResume ? { progress: payload.progress } : null;
-        const savedChapterIndex = shouldResume ? payload.progress.last_chapter_index : initialChapterIndex;
+        const savedBookmark = shouldResume ? payload.bookmark : null;
+        const savedProgress = shouldResume ? payload.progress : null;
+        pendingRestoreRef.current = savedBookmark
+          ? { kind: "bookmark", bookmark: savedBookmark }
+          : savedProgress
+            ? { kind: "progress", progress: savedProgress }
+            : null;
+        const savedChapterIndex = savedBookmark?.chapter_index ?? savedProgress?.last_chapter_index ?? initialChapterIndex ?? 0;
         const nextChapterIndex = payload.chapters.some((item) => item.chapter_index === savedChapterIndex) ? savedChapterIndex : 0;
         const nextChapter = payload.chapters.find((item) => item.chapter_index === nextChapterIndex);
-        const savedPart = shouldResume ? nextChapter?.parts.find((part) => part.part_index === payload.progress.last_part_index) : null;
-        const blockPart = shouldResume
+        const savedPart = savedBookmark
+          ? nextChapter?.parts.find((part) => part.part_index === savedBookmark.part_index)
+          : savedProgress
+            ? nextChapter?.parts.find((part) => part.part_index === savedProgress.last_part_index)
+            : null;
+        const blockPart = savedBookmark
           ? nextChapter?.parts.find(
               (part) =>
-                payload.progress.last_block_index >= part.start_block_index &&
-                payload.progress.last_block_index <= part.end_block_index,
+                savedBookmark.block_index >= part.start_block_index &&
+                savedBookmark.block_index <= part.end_block_index,
+            )
+          : savedProgress
+          ? nextChapter?.parts.find(
+              (part) =>
+                savedProgress.last_block_index >= part.start_block_index &&
+                savedProgress.last_block_index <= part.end_block_index,
             )
           : null;
         const nextPartIndex = savedPart?.part_index ?? blockPart?.part_index ?? 0;
@@ -680,6 +706,8 @@ function ReaderView({
     () => activeChapter?.parts.find((item) => item.part_index === partIndex),
     [activeChapter, partIndex],
   );
+  const bookmark = reader?.bookmark ?? null;
+  const bookmarkedTokenKey = bookmark ? timedTokenKey(bookmark.block_index, bookmark.token_index) : null;
   const wordlistRoots = useMemo(
     () => new Set(wordlistEntries.map((entry) => entry.root_word)),
     [wordlistEntries],
@@ -855,7 +883,7 @@ function ReaderView({
 
   const saveCurrentProgress = useCallback(
     (options: SaveProgressOptions = {}) => {
-      if (!reader || !activePart || pendingResumeRef.current || pendingAudioResumeTimeRef.current !== null) {
+      if (!reader || !activePart || pendingRestoreRef.current || pendingAudioResumeTimeRef.current !== null) {
         return;
       }
       const audio = audioRef.current;
@@ -1069,14 +1097,37 @@ function ReaderView({
   }, [activePart, bookId, chapterIndex, partAudio]);
 
   useEffect(() => {
-    const pending = pendingResumeRef.current;
+    const pending = pendingRestoreRef.current;
     if (!pending || !reader || !chapter || !activePart) {
       return;
     }
 
     const finishRestore = () => {
-      pendingResumeRef.current = null;
+      pendingRestoreRef.current = null;
     };
+    if (pending.kind === "bookmark") {
+      const key = timedTokenKey(pending.bookmark.block_index, pending.bookmark.token_index);
+      const tokenElement = tokenRefs.current[key];
+      visibleBlockRef.current = pending.bookmark.block_index;
+      activeTimedTokenRef.current = null;
+      setActiveTokenKey(key);
+      if (tokenElement) {
+        scheduleScrollRestore(() => {
+          tokenElement.scrollIntoView({ block: "center" });
+        });
+      } else {
+        const target = chapter.blocks.find((block) => block.block_index >= pending.bookmark.block_index);
+        scheduleScrollRestore(() => {
+          if (target) {
+            document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
+          } else {
+            window.scrollTo({ top: 0 });
+          }
+        });
+      }
+      finishRestore();
+      return;
+    }
     const progress = pending.progress;
 
     if (partAudio) {
@@ -1154,7 +1205,7 @@ function ReaderView({
   }, [activePart, audioState.duration, chapter, loadingAlignment, loadingAudio, partAlignment, partAudio, reader]);
 
   useEffect(() => {
-    if (!chapter || pendingResumeRef.current) {
+    if (!chapter || pendingRestoreRef.current) {
       return;
     }
     const pendingPartBlock = pendingPartBlockRef.current;
@@ -1290,6 +1341,81 @@ function ReaderView({
       });
     }
   }, [chapterIndex]);
+
+  const restoreBookmark = useCallback(
+    (savedBookmark: ReadingBookmark) => {
+      const key = timedTokenKey(savedBookmark.block_index, savedBookmark.token_index);
+      const tokenElement = tokenRefs.current[key];
+      visibleBlockRef.current = savedBookmark.block_index;
+      activeTimedTokenRef.current = null;
+      setActiveTokenKey(key);
+      if (tokenElement) {
+        scheduleScrollRestore(() => {
+          tokenElement.scrollIntoView({ block: "center" });
+        });
+        return;
+      }
+
+      const target = chapter?.blocks.find((block) => block.block_index >= savedBookmark.block_index);
+      scheduleScrollRestore(() => {
+        if (target) {
+          document.getElementById(blockDomId(target.block_index))?.scrollIntoView({ block: "center" });
+        } else {
+          window.scrollTo({ top: 0 });
+        }
+      });
+    },
+    [chapter],
+  );
+
+  const jumpToBookmark = useCallback(() => {
+    if (!bookmark) {
+      return;
+    }
+    if (chapterIndex === bookmark.chapter_index && partIndex === bookmark.part_index && chapter) {
+      restoreBookmark(bookmark);
+      return;
+    }
+    pendingRestoreRef.current = { kind: "bookmark", bookmark };
+    pendingPartBlockRef.current = bookmark.block_index;
+    setPartIndex(bookmark.part_index);
+    setChapterIndex(bookmark.chapter_index);
+  }, [bookmark, chapter, chapterIndex, partIndex, restoreBookmark]);
+
+  const saveCurrentBookmark = useCallback(() => {
+    if (!reader || !chapter || !activeTokenKey) {
+      return;
+    }
+    const [blockPart, tokenPart] = activeTokenKey.split(":");
+    const blockIndex = Number(blockPart);
+    const tokenIndex = Number(tokenPart);
+    if (!Number.isFinite(blockIndex) || !Number.isFinite(tokenIndex)) {
+      return;
+    }
+    const block = chapter.blocks.find((item) => item.block_index === blockIndex);
+    const token = block?.tokens[tokenIndex];
+    if (!block || !token || !token.normalized_text) {
+      toast.error("Pick a word first.");
+      return;
+    }
+
+    void saveBookmark({
+      bookId,
+      chapterIndex: chapter.chapter_index,
+      partIndex: activePart?.part_index ?? partIndex,
+      blockIndex,
+      tokenIndex,
+      word: token.text,
+      rootWord: token.root_text || token.normalized_text,
+      scrollRatio: currentScrollRatio(),
+      progressPercent: readingProgressPercent(reader, chapter, blockIndex),
+    })
+      .then((saved) => {
+        setReader((current) => (current ? { ...current, bookmark: saved } : current));
+        toast.success("Bookmark saved.");
+      })
+      .catch((error) => toast.error(errorMessage(error, "Failed to save bookmark.")));
+  }, [activePart?.part_index, activeTokenKey, bookId, chapter, partIndex, reader]);
 
   const toggleSearch = useCallback(() => {
     const nextOpen = !searchOpen;
@@ -1786,12 +1912,20 @@ function ReaderView({
 
   const seekToRelativeToken = useCallback(
     (blockIndex: number, tokenIndex: number) => {
+      const key = timedTokenKey(blockIndex, tokenIndex);
       const audio = audioRef.current;
-      if (!audio || !partAudio) {
-        return;
-      }
-      const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : partAudio.duration_seconds;
-      if (!Number.isFinite(duration) || duration <= 0) {
+      const duration =
+        audio && partAudio
+          ? Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : partAudio.duration_seconds
+          : 0;
+      if (!audio || !partAudio || duration <= 0) {
+        visibleBlockRef.current = blockIndex;
+        setActiveTokenKey(key);
+        scheduleScrollRestore(() => {
+          tokenRefs.current[key]?.scrollIntoView({ block: "center" });
+        });
         return;
       }
 
@@ -1836,16 +1970,12 @@ function ReaderView({
       stopWordPreview();
       audio.currentTime = clampNumber(targetTime, 0, duration);
       setAudioState((current) => ({ ...current, currentTime: audio.currentTime }));
-      setActiveTokenKey(timedTokenKey(blockIndex, tokenIndex));
+      setActiveTokenKey(key);
     },
     [partAudio, stopWordPreview, timedTokensByKey, visibleBlocks],
   );
 
   useEffect(() => {
-    if (!partAlignment?.tokens.length) {
-      return;
-    }
-
     const seekSelectedWord = (event: KeyboardEvent | MouseEvent) => {
       if (event instanceof MouseEvent && event.button !== 0) {
         return;
@@ -1873,7 +2003,7 @@ function ReaderView({
       const blockIndex = Number(tokenElement.dataset.blockIndex);
       const tokenIndex = Number(tokenElement.dataset.tokenIndex);
       const key = tokenElement.dataset.timedTokenKey ?? "";
-      if (!Number.isFinite(blockIndex) || !Number.isFinite(tokenIndex) || !timedTokensByKey.has(key)) {
+      if (!Number.isFinite(blockIndex) || !Number.isFinite(tokenIndex)) {
         return;
       }
       const seekKey = `${key}:${text}`;
@@ -1881,7 +2011,11 @@ function ReaderView({
         return;
       }
       lastSelectionSeekKeyRef.current = seekKey;
-      seekToTimedToken(blockIndex, tokenIndex);
+      if (timedTokensByKey.has(key)) {
+        seekToTimedToken(blockIndex, tokenIndex);
+        return;
+      }
+      seekToRelativeToken(blockIndex, tokenIndex);
     };
 
     document.addEventListener("mouseup", seekSelectedWord);
@@ -1890,7 +2024,7 @@ function ReaderView({
       document.removeEventListener("mouseup", seekSelectedWord);
       document.removeEventListener("keyup", seekSelectedWord);
     };
-  }, [partAlignment, seekToTimedToken, timedTokensByKey]);
+  }, [seekToRelativeToken, seekToTimedToken, timedTokensByKey]);
 
   const audioGenerationPercent = Math.round(audioProgress?.percent ?? 0);
   const audioGenerationStatus =
@@ -1940,6 +2074,30 @@ function ReaderView({
                 </TooltipTrigger>
                 <TooltipContent>Search</TooltipContent>
               </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={bookmark && bookmarkedTokenKey === activeTokenKey ? "secondary" : "ghost"}
+                    size="icon"
+                    onClick={saveCurrentBookmark}
+                    disabled={!activeTokenKey}
+                    aria-label="Save bookmark"
+                  >
+                    <BookmarkIcon />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{activeTokenKey ? "Save selected word" : "Select a word first"}</TooltipContent>
+              </Tooltip>
+              {bookmark ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={jumpToBookmark} aria-label={`Go to ${bookmark.word}`}>
+                      <BookMarkedIcon />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{`Go to ${bookmark.word}`}</TooltipContent>
+                </Tooltip>
+              ) : null}
               <Badge variant="secondary">{reader ? `${Math.round(reader.progress.progress_percent)}%` : "..."}</Badge>
             </div>
           </div>
@@ -2101,6 +2259,7 @@ function ReaderView({
                           chapterIndex={chapterIndex}
                           colorMode={colorMode}
                           activeTokenKey={activeTokenKey}
+                          bookmarkedTokenKey={bookmarkedTokenKey}
                           activeSearchResult={activeSearchResult}
                           chapterFindRanges={chapterFindRangesByBlock.get(block.block_index) ?? []}
                           wordlistRoots={wordlistRoots}
@@ -2865,6 +3024,7 @@ function ReaderTokens({
   chapterIndex,
   colorMode,
   activeTokenKey,
+  bookmarkedTokenKey,
   activeSearchResult,
   chapterFindRanges,
   wordlistRoots,
@@ -2880,6 +3040,7 @@ function ReaderTokens({
   chapterIndex: number;
   colorMode: ColorMode;
   activeTokenKey: string | null;
+  bookmarkedTokenKey: string | null;
   activeSearchResult: ActiveSearchResult | null;
   chapterFindRanges: ChapterFindRange[];
   wordlistRoots: Set<string>;
@@ -2916,6 +3077,7 @@ function ReaderTokens({
         const rootWord = token.root_text || token.normalized_text;
         const isWordlistExact = wordlistExactKeys.has(exactKey);
         const isWordlistRoot = Boolean(rootWord && wordlistRoots.has(rootWord) && !isWordlistExact);
+        const isBookmarked = bookmarkedTokenKey === syncKey;
         const tokenStart = tokenOffset;
         const tokenEnd = tokenStart + token.text.length;
         const isBookSearchHit = Boolean(searchRange && tokenEnd > searchRange.start && tokenStart < searchRange.end);
@@ -2934,6 +3096,7 @@ function ReaderTokens({
               token.normalized_text && "clickable",
               isWordlistRoot && "wordlisted-root",
               isWordlistExact && "marked",
+              isBookmarked && "bookmarked",
               hasTiming && "synced",
               activeTokenKey === syncKey && "active",
               (isBookSearchHit || isChapterFindHit) && "search-hit",
